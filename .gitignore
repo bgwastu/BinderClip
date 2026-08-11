@@ -1,0 +1,3 @@
+android/.gradle/
+android/app/build/
+macos/**/.build/

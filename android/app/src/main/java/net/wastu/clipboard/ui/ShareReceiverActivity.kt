@@ -14,7 +14,11 @@ import net.wastu.clipboard.R
 import net.wastu.clipboard.service.ClipboardService
 import java.io.File
 
-class ShareReceiverActivity : AppCompatActivity() {
+open class ShareReceiverActivity : AppCompatActivity() {
+    companion object {
+        const val EXTRA_OPEN_ON_DEVICE = "open_on_device"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -31,6 +35,23 @@ class ShareReceiverActivity : AppCompatActivity() {
     private fun handleTextShare() {
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         if (!text.isNullOrBlank()) {
+            if (intent.getBooleanExtra(EXTRA_OPEN_ON_DEVICE, false)) {
+                if (!isWebUrl(text)) {
+                    Toast.makeText(this, "Only web links can be opened on the Mac", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val serviceIntent = Intent(this, ClipboardService::class.java).apply {
+                    action = ClipboardService.ACTION_OPEN_URL
+                    putExtra(ClipboardService.EXTRA_URL, text)
+                }
+                runCatching { ContextCompat.startForegroundService(this, serviceIntent) }
+                    .onFailure {
+                        Toast.makeText(this, "Could not start BinderClip", Toast.LENGTH_SHORT).show()
+                        return
+                    }
+                showOpenedToast()
+                return
+            }
             val serviceIntent = Intent(this, ClipboardService::class.java).apply {
                 action = ClipboardService.ACTION_PUSH_TEXT
                 putExtra(ClipboardService.EXTRA_TEXT, text)
@@ -43,6 +64,17 @@ class ShareReceiverActivity : AppCompatActivity() {
             }
             showSentToast()
         }
+    }
+
+    private fun isWebUrl(value: String): Boolean {
+        val uri = Uri.parse(value.trim())
+        return (uri.scheme == "http" || uri.scheme == "https") && !uri.host.isNullOrBlank()
+    }
+
+    private fun showOpenedToast() {
+        val deviceName = getSharedPreferences(ClipboardService.PREFS_NAME, MODE_PRIVATE)
+            .getString(ClipboardService.KEY_CONNECTED_DEVICE, null) ?: "Mac"
+        Toast.makeText(this, "Opening in $deviceName", Toast.LENGTH_SHORT).show()
     }
 
     private fun handleImageShare() {
@@ -132,5 +164,13 @@ class ShareReceiverActivity : AppCompatActivity() {
         else
             getString(R.string.toast_sent)
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Dedicated direct-share target because Android may drop custom shortcut extras. */
+class OpenUrlShareReceiverActivity : ShareReceiverActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        intent.putExtra(EXTRA_OPEN_ON_DEVICE, true)
+        super.onCreate(savedInstanceState)
     }
 }

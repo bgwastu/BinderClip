@@ -4,4 +4,8 @@
         <data android:mimeType="text/plain" />
         <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
     </share-target>
+    <share-target android:targetClass="net.wastu.clipboard.ui.OpenUrlShareReceiverActivity">
+        <data android:mimeType="text/plain" />
+        <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
+    </share-target>
 </shortcuts>

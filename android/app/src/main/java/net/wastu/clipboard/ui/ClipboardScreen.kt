@@ -321,8 +321,8 @@ fun BlePermissionDialog(
 fun VersionMismatchDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Update required") },
-        text = { Text("Install a compatible version of BinderClip on your Mac, then reconnect.") },
+        title = { Text("Connection compatibility issue") },
+        text = { Text("The Mac and Android BinderClip protocol is incompatible. Reconnect after both apps are updated.") },
         confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } }
     )
 }

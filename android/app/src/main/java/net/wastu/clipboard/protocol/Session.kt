@@ -100,6 +100,8 @@ class Session(
 
     /** Queue of outbound clipboard transfers (plaintext). */
     private val outboundQueue = LinkedBlockingQueue<ByteArray>()
+    /** Queue of URLs requested to open on the Mac. */
+    private val openUrlQueue = LinkedBlockingQueue<String>()
 
     /** Queue of outbound image transfers: (imageData, contentType). */
     private val imageQueue = LinkedBlockingQueue<Pair<ByteArray, String>>()
@@ -289,6 +291,12 @@ class Session(
                     continue
                 }
 
+                val url = openUrlQueue.poll()
+                if (url != null) {
+                    doOpenUrl(url)
+                    continue
+                }
+
                 // Check for queued outbound transfers (short poll)
                 val outbound = outboundQueue.poll(50, TimeUnit.MILLISECONDS)
                 if (outbound != null) {
@@ -346,6 +354,7 @@ class Session(
                 }
             }
             MessageType.CONFIG_UPDATE -> handleConfigUpdate(msg)
+            MessageType.OPEN_URL -> Log.w(tag, "Ignoring unexpected OPEN_URL from Mac")
             MessageType.REJECT -> { /* handled in later task */ }
             MessageType.ERROR -> { /* handled in later task */ }
             else -> Log.w(tag, "Ignoring unexpected message type: ${msg.type}")
@@ -362,6 +371,17 @@ class Session(
     fun sendClipboard(plaintext: ByteArray) {
         if (closed.get()) return
         outboundQueue.put(plaintext)
+    }
+
+    fun openUrl(url: String) {
+        if (closed.get()) return
+        openUrlQueue.put(url)
+    }
+
+    private fun doOpenUrl(url: String) {
+        val key = sessionKey ?: throw ProtocolException("No session key available")
+        val encrypted = E2ECrypto.seal(url.toByteArray(Charsets.UTF_8), key)
+        MessageCodec.write(output, Message(MessageType.OPEN_URL, encrypted))
     }
 
     private fun doSendClipboard(plaintext: ByteArray) {
@@ -414,15 +434,16 @@ class Session(
     private fun doSendImage(imageData: ByteArray, contentType: String) {
         val key = sessionKey ?: throw ProtocolException("No session key available")
         val hash = sha256Hex(imageData)
-        val senderIp = NetworkUtil.getLocalIpAddress()
-            ?: throw ProtocolException("No local IP address available")
+        val senderIps = NetworkUtil.getLocalIpAddresses()
+        val senderIp = senderIps.firstOrNull()
 
         // Send OFFER over BLE
         val offerJson = JSONObject().apply {
             put("hash", hash)
             put("size", imageData.size)
             put("type", contentType)
-            put("senderIp", senderIp)
+            if (senderIp != null) put("senderIp", senderIp)
+            put("senderIps", senderIps)
             put("supportsNonce", true)
         }
         val offer = Message(MessageType.OFFER, offerJson.toString().toByteArray())
@@ -433,8 +454,19 @@ class Session(
         when (response.type) {
             MessageType.ACCEPT -> {
                 val acceptJson = JSONObject(String(response.payload))
-                val tcpHost = acceptJson.getString("tcpHost")
+                val tcpHosts = buildList {
+                    val hosts = acceptJson.optJSONArray("tcpHosts")
+                    if (hosts != null) {
+                        for (i in 0 until hosts.length()) {
+                            hosts.optString(i).takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                    if (isEmpty()) acceptJson.optString("tcpHost").takeIf { it.isNotBlank() }?.let(::add)
+                }
                 val tcpPort = acceptJson.getInt("tcpPort")
+                if (tcpHosts.isEmpty() || tcpPort <= 0) {
+                    throw ProtocolException("Invalid ACCEPT payload for image")
+                }
                 // Parse optional tcpNonce (new receivers include this)
                 // TODO(2026-05-01): Remove IP validation fallback — all clients should support tcpNonce by now
                 val tcpNonce = acceptJson.optString("tcpNonce").takeIf { it.isNotEmpty() }?.let { hex ->
@@ -448,21 +480,18 @@ class Session(
 
                 // Push via TCP with retry (2 attempts, 500ms pause)
                 var lastError: Exception? = null
-                for (attempt in 1..2) {
-                    try {
-                        TcpImageSender.send(
-                            tcpHost,
-                            tcpPort,
-                            encrypted,
-                            nonce = tcpNonce,
-                            sourceIp = NetworkUtil.getLocalIpAddress(),
-                        )
-                        lastError = null
-                        break
-                    } catch (e: Exception) {
-                        lastError = e
-                        if (attempt < 2) Thread.sleep(500)
+                for (host in tcpHosts) {
+                    for (attempt in 1..2) {
+                        try {
+                            TcpImageSender.send(host, tcpPort, encrypted, nonce = tcpNonce)
+                            lastError = null
+                            break
+                        } catch (e: Exception) {
+                            lastError = e
+                            if (attempt < 2) Thread.sleep(500)
+                        }
                     }
+                    if (lastError == null) break
                 }
 
                 if (lastError != null) {
@@ -572,6 +601,7 @@ class Session(
             // Send ACCEPT with TCP server info (and nonce when sender supports it)
             val acceptJson = JSONObject().apply {
                 put("tcpHost", serverInfo.host)
+                put("tcpHosts", NetworkUtil.getLocalIpAddresses())
                 put("tcpPort", serverInfo.port)
                 if (tcpNonce != null) {
                     put("tcpNonce", tcpNonce.joinToString("") { "%02x".format(it) })

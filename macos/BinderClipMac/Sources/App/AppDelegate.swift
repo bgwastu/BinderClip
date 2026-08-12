@@ -330,8 +330,8 @@ extension AppDelegate: ConnectionControllerDelegate {
         switch error {
         case .versionMismatch:
             showBluetoothAlert(
-                message: "App Update Required",
-                info: "Your Android app needs to be updated to continue syncing. Update via Google Play."
+                message: "Connection Compatibility Issue",
+                info: "BinderClip on Android and macOS cannot agree on the connection protocol. Reinstall or update both copies, then pair again."
             )
         case .peerRemovedPairing:
             showBluetoothAlert(

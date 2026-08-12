@@ -46,6 +46,7 @@ import java.util.concurrent.Executors
 class ClipboardService : Service(), L2capServerCallback {
     companion object {
         const val ACTION_PUSH_TEXT = "net.wastu.clipboard.action.PUSH_TEXT"
+        const val ACTION_OPEN_URL = "net.wastu.clipboard.action.OPEN_URL"
         const val ACTION_RELOAD_PAIRING = "net.wastu.clipboard.action.RELOAD_PAIRING"
         const val ACTION_UNPAIR = "net.wastu.clipboard.action.UNPAIR"
         const val ACTION_FORGET_DEVICE = "net.wastu.clipboard.action.FORGET_DEVICE"
@@ -61,6 +62,7 @@ class ClipboardService : Service(), L2capServerCallback {
         const val PAIRING_STAGE_EXCHANGING_KEYS = "EXCHANGING_KEYS"
         const val PAIRING_STAGE_FAILED = "FAILED"
         const val EXTRA_TEXT = "extra_text"
+        const val EXTRA_URL = "extra_url"
         const val EXTRA_CONNECTED = "extra_connected"
         const val EXTRA_DEVICE_NAME = "extra_device_name"
         const val EXTRA_DEVICE_ID = "extra_device_id"
@@ -346,6 +348,11 @@ class ClipboardService : Service(), L2capServerCallback {
                     executor.execute {
                         pushPlainTextToMac(text)
                     }
+                }
+            }
+            ACTION_OPEN_URL -> {
+                intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { url ->
+                    executor.execute { openUrlOnMac(url) }
                 }
             }
             ACTION_QUERY_CONNECTION -> {
@@ -741,6 +748,10 @@ class ClipboardService : Service(), L2capServerCallback {
         DebugSmokeProbe.onOutboundClipboardPublished(this, text)
     }
 
+    private fun openUrlOnMac(url: String) {
+        readySessions().forEach { it.session?.openUrl(url) }
+    }
+
     private fun pushImageToMac(imagePath: String, mimeType: String) {
         if (isDestroyed) return
         val file = java.io.File(imagePath)
@@ -1014,9 +1025,9 @@ class ClipboardService : Service(), L2capServerCallback {
 
     private fun publishDirectShareShortcut(deviceName: String?) {
         val label = deviceName ?: "Mac"
-        val shortcut = ShortcutInfoCompat.Builder(this, "send_to_mac")
-            .setShortLabel(label)
-            .setIcon(IconCompat.createWithResource(this, R.mipmap.ic_launcher))
+        val sendShortcut = ShortcutInfoCompat.Builder(this, "send_to_mac")
+            .setShortLabel("Send to $label")
+            .setIcon(IconCompat.createWithResource(this, R.drawable.ic_share_to_device))
             .setIntent(Intent(Intent.ACTION_SEND).apply {
                 setClass(this@ClipboardService, net.wastu.clipboard.ui.ShareReceiverActivity::class.java)
                 type = "*/*"
@@ -1026,12 +1037,23 @@ class ClipboardService : Service(), L2capServerCallback {
             .setLongLived(true)
             .build()
 
-        ShortcutManagerCompat.addDynamicShortcuts(this, listOf(shortcut))
-        Log.d(TAG, "Published direct share shortcut: $label")
+        val openShortcut = ShortcutInfoCompat.Builder(this, "open_on_device")
+            .setShortLabel("Open in $label")
+            .setIcon(IconCompat.createWithResource(this, R.drawable.ic_open_in_device))
+            .setIntent(Intent(Intent.ACTION_SEND).apply {
+                setClass(this@ClipboardService, net.wastu.clipboard.ui.OpenUrlShareReceiverActivity::class.java)
+                type = "text/plain"
+            })
+            .setCategories(setOf("net.wastu.clipboard.category.SEND_TO_MAC"))
+            .setLongLived(true)
+            .build()
+
+        ShortcutManagerCompat.addDynamicShortcuts(this, listOf(sendShortcut, openShortcut))
+        Log.d(TAG, "Published direct share shortcuts for $label")
     }
 
     private fun removeDirectShareShortcut() {
-        ShortcutManagerCompat.removeDynamicShortcuts(this, listOf("send_to_mac"))
+        ShortcutManagerCompat.removeDynamicShortcuts(this, listOf("send_to_mac", "open_on_device"))
         Log.d(TAG, "Removed direct share shortcut")
     }
 

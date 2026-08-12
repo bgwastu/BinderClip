@@ -1,6 +1,7 @@
 // Manages a single L2CAP protocol session: handshake, clipboard offer/accept, and payload transfer.
 
 import Foundation
+import AppKit
 import CommonCrypto
 import CryptoKit
 import Security
@@ -100,6 +101,7 @@ final class Session {
 
     /// Queue of outbound clipboard transfers (plaintext).
     private var outboundQueue: [Data] = []
+    private var openURLQueue: [String] = []
     /// Queue of outbound image transfers: (imageData, contentType).
     private var imageQueue: [(Data, String)] = []
     private var configUpdateQueue: [Message] = []
@@ -305,6 +307,11 @@ final class Session {
                     continue
                 }
 
+                if let url = dequeueOpenURL() {
+                    try doOpenURL(url)
+                    continue
+                }
+
                 // Check for queued outbound transfers
                 if let outbound = dequeueOutbound() {
                     try doSendClipboard(outbound)
@@ -356,6 +363,8 @@ final class Session {
             }
         case .configUpdate:
             handleConfigUpdate(msg)
+        case .openUrl:
+            try handleOpenURL(msg)
         case .reject:
             break // handled in later task
         case .error:
@@ -405,6 +414,51 @@ final class Session {
         queueLock.lock()
         outboundQueue.append(plaintext)
         queueLock.unlock()
+    }
+
+    /// Queue a URL to open on the Mac. The URL is encrypted in the session.
+    func openURL(_ url: String) {
+        guard !closed else { return }
+        queueLock.lock()
+        openURLQueue.append(url)
+        queueLock.unlock()
+    }
+
+    private func dequeueOpenURL() -> String? {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        if openURLQueue.isEmpty { return nil }
+        return openURLQueue.removeFirst()
+    }
+
+    private func doOpenURL(_ url: String) throws {
+        guard let key = sessionKey else {
+            throw SessionError.protocolError("No session key available")
+        }
+        let encrypted = try E2ECrypto.seal(Data(url.utf8), key: key)
+        try writeMessage(Message(type: .openUrl, payload: encrypted))
+    }
+
+    private func handleOpenURL(_ msg: Message) throws {
+        guard let key = sessionKey else {
+            throw SessionError.protocolError("No session key available")
+        }
+        let urlString = String(data: try E2ECrypto.open(msg.payload, key: key), encoding: .utf8) ?? ""
+        guard let url = URL(string: urlString), ["http", "https"].contains(url.scheme?.lowercased()) else {
+            throw SessionError.protocolError("Invalid URL request")
+        }
+        DiagnosticLog.shared.log("Opening shared URL: \(url.absoluteString)", category: "URL")
+        DispatchQueue.main.async {
+            let opened = NSWorkspace.shared.open(url)
+            if let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: url),
+               let bundleIdentifier = Bundle(url: applicationURL)?.bundleIdentifier {
+                NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+                    .forEach { application in
+                        application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    }
+            }
+            DiagnosticLog.shared.log("Shared URL open result: \(opened)", category: "URL")
+        }
     }
 
     /// Queue an image for sending. Thread-safe.
@@ -484,7 +538,8 @@ final class Session {
             throw SessionError.protocolError("No session key available")
         }
         let hash = Session.sha256Hex(imageData)
-        guard let senderIp = LocalNetworkAddress.getLocalIPv4Address() else {
+        let senderIps = LocalNetworkAddress.getLocalIPv4Addresses()
+        guard let senderIp = senderIps.first else {
             throw SessionError.protocolError("No local IP address available")
         }
 
@@ -494,6 +549,7 @@ final class Session {
             "size": imageData.count,
             "type": contentType,
             "senderIp": senderIp,
+            "senderIps": senderIps,
             "supportsNonce": true
         ]
         let offerData = try JSONSerialization.data(withJSONObject: offerJSON)
@@ -505,9 +561,13 @@ final class Session {
         switch response.type {
         case .accept:
             guard let acceptJson = try? JSONSerialization.jsonObject(with: response.payload) as? [String: Any],
-                  let tcpHost = acceptJson["tcpHost"] as? String,
-                  let tcpPort = acceptJson["tcpPort"] as? Int else {
+                   let tcpPort = acceptJson["tcpPort"] as? Int else {
                 throw SessionError.protocolError("Invalid ACCEPT payload for image")
+            }
+            let tcpHosts = (acceptJson["tcpHosts"] as? [String])
+                ?? [(acceptJson["tcpHost"] as? String) ?? ""]
+            guard tcpHosts.contains(where: { !$0.isEmpty }) else {
+                throw SessionError.protocolError("Invalid ACCEPT hosts for image")
             }
 
             // Parse optional tcpNonce (new receivers include this)
@@ -522,21 +582,23 @@ final class Session {
 
             // Push via TCP with retry (2 attempts, 500ms pause)
             var lastError: Error?
-            for attempt in 1...2 {
-                do {
-                    try TcpImageSender.send(
-                        host: tcpHost,
-                        port: UInt16(tcpPort),
-                        data: encrypted,
-                        nonce: tcpNonce,
-                        sourceIp: LocalNetworkAddress.getLocalIPv4Address()
-                    )
-                    lastError = nil
-                    break
-                } catch {
-                    lastError = error
-                    if attempt < 2 { Thread.sleep(forTimeInterval: 0.5) }
+            for host in tcpHosts where !host.isEmpty {
+                for attempt in 1...2 {
+                    do {
+                        try TcpImageSender.send(
+                            host: host,
+                            port: UInt16(tcpPort),
+                            data: encrypted,
+                            nonce: tcpNonce
+                        )
+                        lastError = nil
+                        break
+                    } catch {
+                        lastError = error
+                        if attempt < 2 { Thread.sleep(forTimeInterval: 0.5) }
+                    }
                 }
+                if lastError == nil { break }
             }
 
             if let err = lastError {
@@ -640,6 +702,7 @@ final class Session {
             // Send ACCEPT with TCP server info (and nonce when sender supports it)
             var acceptJSON: [String: Any] = [
                 "tcpHost": serverInfo.host,
+                "tcpHosts": LocalNetworkAddress.getLocalIPv4Addresses(),
                 "tcpPort": Int(serverInfo.port)
             ]
             if let nonce = tcpNonce {

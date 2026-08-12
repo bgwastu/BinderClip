@@ -15,8 +15,6 @@ final class StatusBarController {
     var isImageSyncEnabled: (() -> Bool)?
     var isDeviceConnected: (() -> Bool)?
     var onCheckForUpdates: (() -> Void)?
-    var isMediaOverlayEnabled: (() -> Bool)?
-    var onToggleMediaOverlay: (() -> Void)?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: 18)
     private let menu = NSMenu()
@@ -25,6 +23,8 @@ final class StatusBarController {
     private var trustedPeers: [PeerSummary] = []
     private var bluetoothWarning: String?
     private var bluetoothWarningAction: (() -> Void)?
+    private var notificationPermissionWarning: String?
+    private var notificationPermissionAction: (() -> Void)?
 
     private var binderStatusBarImage: NSImage?
     private var syncPulseTimer: Timer?
@@ -152,6 +152,12 @@ final class StatusBarController {
         renderMenu()
     }
 
+    func setNotificationPermissionWarning(_ warning: String?, action: (() -> Void)? = nil) {
+        notificationPermissionWarning = warning
+        notificationPermissionAction = action
+        renderMenu()
+    }
+
 
     /// Briefly pulses the status bar icon to indicate a clipboard sync.
     func flashSyncIndicator() {
@@ -213,6 +219,19 @@ final class StatusBarController {
             menu.addItem(NSMenuItem.separator())
         }
 
+        if let notificationPermissionWarning {
+            let item = NSMenuItem(
+                title: notificationPermissionWarning,
+                action: #selector(handleNotificationPermissionSelected),
+                keyEquivalent: ""
+            )
+            item.image = NSImage(systemSymbolName: "bell.badge.fill", accessibilityDescription: "notifications")
+            item.target = self
+            item.isEnabled = notificationPermissionAction != nil
+            menu.addItem(item)
+            menu.addItem(NSMenuItem.separator())
+        }
+
         renderTrustedDevicesSection()
         menu.addItem(NSMenuItem.separator())
 
@@ -267,15 +286,6 @@ final class StatusBarController {
             skipSecretsItem.state = .on
         }
         menu.addItem(skipSecretsItem)
-
-        let overlayItem = NSMenuItem(
-            title: "Media Transfer Progress Overlay",
-            action: #selector(handleToggleMediaOverlay),
-            keyEquivalent: ""
-        )
-        overlayItem.target = self
-        overlayItem.state = isMediaOverlayEnabled?() == true ? .on : .off
-        menu.addItem(overlayItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -363,6 +373,11 @@ final class StatusBarController {
     }
 
     @objc
+    private func handleNotificationPermissionSelected() {
+        notificationPermissionAction?()
+    }
+
+    @objc
     private func handleToggleLaunchAtLogin() {
         onToggleLaunchAtLogin?()
         renderMenu()
@@ -387,13 +402,6 @@ final class StatusBarController {
     private func handleCheckForUpdates() {
         onCheckForUpdates?()
     }
-
-    @objc
-    private func handleToggleMediaOverlay() {
-        onToggleMediaOverlay?()
-        renderMenu()
-    }
-
 
     @objc
     private func handleForgetDevice(_ sender: NSMenuItem) {

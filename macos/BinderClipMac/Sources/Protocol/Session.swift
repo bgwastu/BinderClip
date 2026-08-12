@@ -28,7 +28,7 @@ protocol SessionDelegate: AnyObject {
     func session(_ session: Session, didChangeRichMediaSetting enabled: Bool)
     func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String)
     func session(_ session: Session, imageWasRejected reason: String)
-    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int)
+    func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int)
 }
 
 extension SessionDelegate {
@@ -36,7 +36,7 @@ extension SessionDelegate {
     func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String) {}
     func session(_ session: Session, imageWasRejected reason: String) {}
     func session(_ session: Session, imageSendFailed reason: String) {}
-    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int) {}
+    func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int) {}
 }
 
 // MARK: - Session Errors
@@ -105,7 +105,8 @@ final class Session {
     private var outboundQueue: [Data] = []
     private var openURLQueue: [String] = []
     /// Queue of outbound image transfers: (imageData, contentType).
-    private var imageQueue: [(Data, String)] = []
+    private var imageQueue: [(Data, String, String?)] = []
+    private var mediaCancelled = false
     private var configUpdateQueue: [Message] = []
     private let queueLock = NSLock()
 
@@ -305,7 +306,7 @@ final class Session {
 
                 // Check for queued image transfers
                 if let imageItem = dequeueImage() {
-                    try doSendImage(imageItem.0, contentType: imageItem.1)
+                    try doSendImage(imageItem.0, contentType: imageItem.1, fileName: imageItem.2)
                     continue
                 }
 
@@ -465,14 +466,21 @@ final class Session {
 
     /// Queue an image for sending. Thread-safe.
     /// The actual transfer happens in the listen loop via TCP.
-    func sendImage(_ imageData: Data, contentType: String) {
+    func sendImage(_ imageData: Data, contentType: String, fileName: String? = nil) {
         guard !closed else { return }
         queueLock.lock()
-        imageQueue.append((imageData, contentType))
+        imageQueue.append((imageData, contentType, fileName))
         queueLock.unlock()
     }
 
-    private func dequeueImage() -> (Data, String)? {
+    func cancelMediaTransfer() {
+        queueLock.lock()
+        mediaCancelled = true
+        imageQueue.removeAll()
+        queueLock.unlock()
+    }
+
+    private func dequeueImage() -> (Data, String, String?)? {
         queueLock.lock()
         defer { queueLock.unlock() }
         if imageQueue.isEmpty { return nil }
@@ -535,7 +543,8 @@ final class Session {
 
     // MARK: - Outbound Image Transfer
 
-    private func doSendImage(_ imageData: Data, contentType: String) throws {
+    private func doSendImage(_ imageData: Data, contentType: String, fileName: String?) throws {
+        mediaCancelled = false
         guard let key = sessionKey else {
             throw SessionError.protocolError("No session key available")
         }
@@ -546,7 +555,7 @@ final class Session {
         }
 
         // Send OFFER over BLE
-        let offerJSON: [String: Any] = [
+        var offerJSON: [String: Any] = [
             "hash": hash,
             "size": imageData.count,
             "type": contentType,
@@ -554,6 +563,7 @@ final class Session {
             "senderIps": senderIps,
             "supportsNonce": true
         ]
+        if let fileName { offerJSON["name"] = fileName }
         let offerData = try JSONSerialization.data(withJSONObject: offerJSON)
         let offer = Message(type: .offer, payload: offerData)
         try writeMessage(offer)
@@ -592,9 +602,10 @@ final class Session {
                             port: UInt16(tcpPort),
                             data: encrypted,
                             nonce: tcpNonce,
+                            shouldCancel: { [weak self] in self?.mediaCancelled ?? true },
                             progress: { [weak self] sent, total in
                                 guard let self else { return }
-                                self.delegate?.session(self, mediaTransferProgress: hash, transferred: sent, total: total)
+                                self.delegate?.session(self, mediaTransferProgress: hash, fileName: fileName, transferred: sent, total: total)
                             }
                         )
                         lastError = nil
@@ -657,6 +668,7 @@ final class Session {
             throw SessionError.protocolError("Invalid image OFFER payload")
         }
         let senderIp = json["senderIp"] as? String
+        let fileName = json["name"] as? String
 
         // Check richMediaEnabled
         guard let sp = settingsProvider, sp.isRichMediaEnabled() else {
@@ -720,7 +732,7 @@ final class Session {
             // Await TCP data
             let encrypted = try receiver.receive { [weak self] received, total in
                 guard let self else { return }
-                self.delegate?.session(self, mediaTransferProgress: hash, transferred: received, total: total)
+                self.delegate?.session(self, mediaTransferProgress: hash, fileName: fileName, transferred: received, total: total)
             }
 
             // Decrypt

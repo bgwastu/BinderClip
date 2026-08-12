@@ -36,7 +36,6 @@ class MainActivity : AppCompatActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private lateinit var clipboardSettingsStore: ClipboardSettingsStore
-    private var pendingMediaOverlayEnable = false
 
     // Pairing is gated on the BLE ("Nearby devices") runtime permission: without it
     // the connectedDevice foreground service cannot start and pairing would fail.
@@ -151,9 +150,8 @@ class MainActivity : AppCompatActivity() {
         val autoClearEnabled = clipboardSettingsStore.isAutoClearSyncedClipboardEnabled()
         val autoCopyEnabled = clipboardSettingsStore.isAutoCopyEnabled()
         val imageSyncEnabled = pairingStore.isRichMediaEnabled()
-        val mediaOverlayEnabled = clipboardSettingsStore.isMediaOverlayEnabled()
         val hideClipboardEnabled = clipboardSettingsStore.isHideSyncedClipboardEnabled()
-        viewModel.initState(loadMacsForUi(emptySet()), autoClearEnabled, autoCopyEnabled, imageSyncEnabled, hideClipboardEnabled, mediaOverlayEnabled)
+        viewModel.initState(loadMacsForUi(emptySet()), autoClearEnabled, autoCopyEnabled, imageSyncEnabled, hideClipboardEnabled)
 
         setContent {
             val state by viewModel.state.collectAsState()
@@ -162,7 +160,6 @@ class MainActivity : AppCompatActivity() {
             val autoCopyEnabled by viewModel.autoCopyEnabled.collectAsState()
             val autoCopyAccessibilityEnabled by viewModel.autoCopyAccessibilityEnabled.collectAsState()
             val imageSyncEnabled by viewModel.imageSyncEnabled.collectAsState()
-            val mediaOverlayEnabled by viewModel.mediaOverlayEnabled.collectAsState()
             val showVersionMismatch by viewModel.showVersionMismatch.collectAsState()
             val pairingFailed by viewModel.pairingFailed.collectAsState()
             var showAccessibilityDisclosure by remember { mutableStateOf(false) }
@@ -217,7 +214,6 @@ class MainActivity : AppCompatActivity() {
                 autoCopyEnabled = autoCopyEnabled,
                 autoCopyAccessibilityEnabled = autoCopyAccessibilityEnabled,
                 imageSyncEnabled = imageSyncEnabled,
-                mediaOverlayEnabled = mediaOverlayEnabled,
                 pairingFailed = pairingFailed,
                 onPairingCancelClick = {
                     viewModel.onPairingCancelled()
@@ -275,16 +271,6 @@ class MainActivity : AppCompatActivity() {
                     configIntent.action = ClipboardService.ACTION_SEND_CONFIG_UPDATE
                     startServiceSafely(configIntent)
                 },
-                onMediaOverlaySettingChanged = { enabled ->
-                    if (enabled && !Settings.canDrawOverlays(this)) {
-                        pendingMediaOverlayEnable = true
-                        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-                        viewModel.onMediaOverlaySettingChanged(false)
-                    } else {
-                        viewModel.onMediaOverlaySettingChanged(enabled)
-                        clipboardSettingsStore.setMediaOverlayEnabled(enabled)
-                    }
-                },
                 onAutoCopyFixClick = {
                     showAccessibilityDisclosure = true
                 },
@@ -320,11 +306,8 @@ class MainActivity : AppCompatActivity() {
         )
         viewModel.onAccessibilityStateChanged(isAccessibilityServiceEnabled())
         viewModel.onImageSyncSettingChanged(PairingStore(this).isRichMediaEnabled())
-        if (pendingMediaOverlayEnable) {
-            pendingMediaOverlayEnable = false
-            val enabled = Settings.canDrawOverlays(this)
-            viewModel.onMediaOverlaySettingChanged(enabled)
-            clipboardSettingsStore.setMediaOverlayEnabled(enabled)
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
         val queryIntent = Intent(this, ClipboardService::class.java)
         queryIntent.action = ClipboardService.ACTION_QUERY_CONNECTION

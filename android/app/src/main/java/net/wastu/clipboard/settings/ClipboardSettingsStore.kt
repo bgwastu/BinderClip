@@ -11,7 +11,6 @@ class ClipboardSettingsStore(context: Context) {
         private const val KEY_HIDE_SYNCED_CLIPBOARD = "hide_synced_clipboard"
         const val KEY_AUTO_COPY_ENABLED = "auto_copy_enabled"
         const val KEY_AUTO_COPY_ONBOARDING_SHOWN = "auto_copy_onboarding_shown"
-        const val KEY_MEDIA_OVERLAY_ENABLED = "media_overlay_enabled"
 
         const val AUTO_CLEAR_DELAY_MS = 60_000L
     }
@@ -52,9 +51,4 @@ class ClipboardSettingsStore(context: Context) {
         prefs.edit().putBoolean(KEY_AUTO_COPY_ONBOARDING_SHOWN, shown).apply()
     }
 
-    fun isMediaOverlayEnabled(): Boolean = prefs.getBoolean(KEY_MEDIA_OVERLAY_ENABLED, false)
-
-    fun setMediaOverlayEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_MEDIA_OVERLAY_ENABLED, enabled).apply()
-    }
 }

@@ -9,6 +9,7 @@ enum TcpImageSender {
         port: UInt16,
         data: Data,
         nonce: Data? = nil,
+        shouldCancel: () -> Bool = { false },
         connectTimeoutMs: Int = 3000,
         progress: ((Int, Int) -> Void)? = nil
     ) throws {
@@ -66,6 +67,7 @@ enum TcpImageSender {
             guard let baseAddress = rawPtr.baseAddress else { return }
             var offset = 0
             while offset < data.count {
+                if shouldCancel() { throw TcpTransferError.sendFailed("Transfer cancelled") }
                 let n = write(fd, baseAddress.advanced(by: offset), min(64 * 1024, data.count - offset))
                 if n < 0 {
                     throw TcpTransferError.sendFailed("write() failed: \(errno)")

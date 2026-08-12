@@ -6,6 +6,7 @@ import CoreBluetooth
 import CryptoKit
 import os
 import ServiceManagement
+import UserNotifications
 
 private let appLogger = Logger(subsystem: "net.wastu.clipboard", category: "App")
 
@@ -40,10 +41,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchedAsLoginItem = Self.isLaunchedAsLoginItem()
         notificationManager.requestAuthorization()
+        refreshNotificationPermission()
         pairingManager.removePendingDevices()
         enableLaunchAtLoginIfFirstRun()
         installSleepWakeObservers()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleApplicationDidBecomeActive),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         updater.checkAndInstall(interactive: false)
+        mediaOverlayController.onCancel = { [weak self] in
+            self?.connectionController?.cancelMediaTransfer()
+        }
 
         statusBarController.onPairNewDeviceRequested = { [weak self] in
             self?.startPairing()
@@ -72,12 +83,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.onCheckForUpdates = { [weak self] in
             self?.updater.checkAndInstall(interactive: true)
         }
-        statusBarController.isMediaOverlayEnabled = { [weak self] in
-            self?.mediaOverlayController.isEnabled ?? false
-        }
-        statusBarController.onToggleMediaOverlay = { [weak self] in
-            self?.mediaOverlayController.isEnabled.toggle()
-        }
         statusBarController.onSkipSecretsEnabled = { [weak self] in
             // Text cached for reconnect-replay while the filter was off may be a
             // secret — drop it so it can't bypass the filter on reconnect.
@@ -101,8 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardMonitor = ClipboardMonitor { [weak self] text in
             self?.connectionController?.sendClipboard(text)
         }
-        clipboardMonitor?.onImageChange = { [weak self] imageData, contentType, _ in
-            self?.connectionController?.sendImage(imageData, contentType: contentType)
+        clipboardMonitor?.onImageChange = { [weak self] imageData, contentType, _, fileName in
+            self?.connectionController?.sendImage(imageData, contentType: contentType, fileName: fileName)
         }
 
         // Start monitoring
@@ -158,6 +163,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         clipboardMonitor?.stop()
         connectionController?.disconnect()
+    }
+
+    @objc private func handleApplicationDidBecomeActive(_ notification: Notification) {
+        guard (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            == Bundle.main.bundleIdentifier else { return }
+        refreshNotificationPermission()
+    }
+
+    private func refreshNotificationPermission() {
+        notificationManager.refreshPermissionStatus { [weak self] status in
+            guard let self else { return }
+            switch status {
+            case .authorized, .provisional, .ephemeral:
+                self.statusBarController.setNotificationPermissionWarning(nil)
+            case .denied:
+                self.statusBarController.setNotificationPermissionWarning(
+                    "Allow Notifications for BinderClip"
+                ) { [weak self] in
+                    self?.openNotificationSettings()
+                }
+            case .notDetermined:
+                self.statusBarController.setNotificationPermissionWarning(
+                    "Enable Notifications for BinderClip"
+                ) { [weak self] in
+                    self?.notificationManager.requestAuthorization { [weak self] in
+                        self?.refreshNotificationPermission()
+                    }
+                }
+            @unknown default:
+                self.statusBarController.setNotificationPermissionWarning(nil)
+            }
+        }
+    }
+
+    private func openNotificationSettings() {
+        let targets = [
+            "x-apple.systempreferences:com.apple.preference.notifications",
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        ]
+        for target in targets {
+            if let url = URL(string: target), NSWorkspace.shared.open(url) { return }
+        }
     }
 
     // MARK: - Launch at Login
@@ -333,6 +380,7 @@ extension AppDelegate: ConnectionControllerDelegate {
             appLogger.error("[App] Failed to write received image to the pasteboard")
         }
         statusBarController.flashSyncIndicator()
+        mediaOverlayController.dismiss()
     }
 
     func didCompletePairing(deviceName: String?) {
@@ -426,7 +474,8 @@ extension AppDelegate: ConnectionControllerDelegate {
         mediaOverlayController.dismiss()
     }
 
-    func mediaTransferProgress(hash: String, transferred: Int, total: Int) {
-        mediaOverlayController.update(transferred: transferred, total: total)
+    func mediaTransferProgress(hash: String, fileName: String?, transferred: Int, total: Int) {
+        if total > 0 && transferred >= total { mediaOverlayController.dismiss() }
+        else { mediaOverlayController.update(fileName: fileName, transferred: transferred, total: total) }
     }
 }

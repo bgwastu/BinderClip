@@ -119,7 +119,7 @@ protocol ConnectionControllerDelegate: AnyObject {
     func didSyncClipboard(hash: String)
     func didChangeImageSyncSetting(enabled: Bool)
     func imageTransferFailed(reason: String)
-    func mediaTransferProgress(hash: String, transferred: Int, total: Int)
+    func mediaTransferProgress(hash: String, fileName: String?, transferred: Int, total: Int)
 }
 
 // MARK: - ConnectionController
@@ -706,13 +706,21 @@ extension ConnectionController {
         queue.sync { pendingClipboard != nil }
     }
 
-    func sendImage(_ data: Data, contentType: String) {
+    func sendImage(_ data: Data, contentType: String, fileName: String? = nil) {
         queue.async { [self] in
             let hash = Session.sha256Hex(data)
             guard hash != lastReceivedImageHash else { return }
             for device in devices.values where device.state.isReady {
                 guard mediaSyncEnabled(for: device.token) else { continue }
-                device.state.session?.sendImage(data, contentType: contentType)
+                device.state.session?.sendImage(data, contentType: contentType, fileName: fileName)
+            }
+        }
+    }
+
+    func cancelMediaTransfer() {
+        queue.async { [self] in
+            for device in devices.values {
+                device.state.session?.cancelMediaTransfer()
             }
         }
     }
@@ -1230,9 +1238,9 @@ extension ConnectionController {
         }
     }
 
-    fileprivate func handleMediaTransferProgress(hash: String, transferred: Int, total: Int) {
+    fileprivate func handleMediaTransferProgress(hash: String, fileName: String?, transferred: Int, total: Int) {
         DispatchQueue.main.async { [weak self] in
-            self?.delegate?.mediaTransferProgress(hash: hash, transferred: transferred, total: total)
+            self?.delegate?.mediaTransferProgress(hash: hash, fileName: fileName, transferred: transferred, total: total)
         }
     }
 }
@@ -1309,8 +1317,8 @@ class SessionAdapter: NSObject, SessionDelegate {
         dispatch { $0.handleImageTransferFailed(reason: "send failed: \(reason)") }
     }
 
-    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int) {
-        dispatch { $0.handleMediaTransferProgress(hash: hash, transferred: transferred, total: total) }
+    func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int) {
+        dispatch { $0.handleMediaTransferProgress(hash: hash, fileName: fileName, transferred: transferred, total: total) }
     }
 
     func session(_ session: Session, alreadyHasHash hash: String) -> Bool {

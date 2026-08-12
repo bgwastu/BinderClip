@@ -40,7 +40,7 @@ final class ClipboardMonitor {
     private var lastHash: String?
 
     /// Callback for image changes: (imageData, contentType, hash)
-    var onImageChange: ((Data, String, String) -> Void)?
+    var onImageChange: ((Data, String, String, String?) -> Void)?
 
     init(pollInterval: TimeInterval = ClipboardMonitor.defaultPollInterval, onChange: @escaping (String) -> Void) {
         self.pollInterval = pollInterval
@@ -79,7 +79,9 @@ final class ClipboardMonitor {
             let hash = digest.map { String(format: "%02x", $0) }.joined()
             guard hash != lastHash else { return }
             lastHash = hash
-            onImageChange?(mediaData, contentType, hash)
+            let fileName = pasteboard.string(forType: NSPasteboard.PasteboardType("public.file-url"))
+                .flatMap { URL(string: $0)?.lastPathComponent }
+            onImageChange?(mediaData, contentType, hash, fileName)
             return
         }
 

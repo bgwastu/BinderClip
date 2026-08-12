@@ -14,6 +14,7 @@ object TcpImageSender {
         port: Int,
         data: ByteArray,
         nonce: ByteArray? = null,
+        shouldCancel: () -> Boolean = { false },
         connectTimeoutMs: Int = 3000,
         onProgress: ((Long, Long) -> Unit)? = null,
     ) {
@@ -26,6 +27,7 @@ object TcpImageSender {
             }
             var offset = 0
             while (offset < data.size) {
+                if (shouldCancel()) throw TcpTransferException("Transfer cancelled")
                 val count = minOf(64 * 1024, data.size - offset)
                 out.write(data, offset, count)
                 offset += count

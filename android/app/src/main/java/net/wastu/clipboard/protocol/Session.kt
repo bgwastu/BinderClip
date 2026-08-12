@@ -104,13 +104,14 @@ class Session(
     private val openUrlQueue = LinkedBlockingQueue<String>()
 
     /** Queue of outbound image transfers: (imageData, contentType). */
-    private val imageQueue = LinkedBlockingQueue<Pair<ByteArray, String>>()
+    private val imageQueue = LinkedBlockingQueue<Triple<ByteArray, String, String?>>()
 
     /** Queue of outbound CONFIG_UPDATE messages. */
     private val configUpdateQueue = LinkedBlockingQueue<Message>()
 
     /** Active TCP image receiver, if any (for cancellation on new inbound offer). */
     private var activeReceiver: TcpImageReceiver? = null
+    private val mediaCancelled = AtomicBoolean(false)
 
     /**
      * Queue of inbound messages, populated by the reader thread.
@@ -287,7 +288,7 @@ class Session(
                 // Check for queued image transfers
                 val imageItem = imageQueue.poll()
                 if (imageItem != null) {
-                    doSendImage(imageItem.first, imageItem.second)
+                    doSendImage(imageItem.first, imageItem.second, imageItem.third)
                     continue
                 }
 
@@ -426,12 +427,19 @@ class Session(
      * Queue an image for sending. Thread-safe.
      * The actual transfer happens in the listen loop via TCP.
      */
-    fun sendImage(imageData: ByteArray, contentType: String) {
+    fun sendImage(imageData: ByteArray, contentType: String, fileName: String? = null) {
         if (closed.get()) return
-        imageQueue.put(Pair(imageData, contentType))
+        imageQueue.put(Triple(imageData, contentType, fileName))
     }
 
-    private fun doSendImage(imageData: ByteArray, contentType: String) {
+    fun cancelMediaTransfer() {
+        mediaCancelled.set(true)
+        activeReceiver?.cancel()
+        imageQueue.clear()
+    }
+
+    private fun doSendImage(imageData: ByteArray, contentType: String, fileName: String?) {
+        mediaCancelled.set(false)
         val key = sessionKey ?: throw ProtocolException("No session key available")
         val hash = sha256Hex(imageData)
         val senderIps = NetworkUtil.getLocalIpAddresses()
@@ -442,6 +450,7 @@ class Session(
             put("hash", hash)
             put("size", imageData.size)
             put("type", contentType)
+            fileName?.let { put("name", it) }
             if (senderIp != null) put("senderIp", senderIp)
             put("senderIps", senderIps)
             put("supportsNonce", true)
@@ -483,8 +492,8 @@ class Session(
                 for (host in tcpHosts) {
                     for (attempt in 1..2) {
                         try {
-                             TcpImageSender.send(host, tcpPort, encrypted, nonce = tcpNonce) { sent, total ->
-                                 callback.onMediaTransferProgress(hash, sent, total)
+                             TcpImageSender.send(host, tcpPort, encrypted, nonce = tcpNonce, shouldCancel = { mediaCancelled.get() }) { sent, total ->
+                                 callback.onMediaTransferProgress(hash, fileName, sent, total)
                              }
                             lastError = null
                             break
@@ -545,6 +554,7 @@ class Session(
     private fun handleInboundImageOffer(msg: Message) {
         val json = JSONObject(String(msg.payload))
         val contentType = json.getString("type")
+        val fileName = json.optString("name").takeIf { it.isNotBlank() }
         val size = json.getInt("size")
         val hash = json.getString("hash")
         val senderIp = json.optString("senderIp").takeIf { it.isNotEmpty() }
@@ -604,7 +614,7 @@ class Session(
 
             // Await TCP data
             val encrypted = receiver.receive { received, total ->
-                callback.onMediaTransferProgress(hash, received, total)
+                callback.onMediaTransferProgress(hash, fileName, received, total)
             }
 
             // Decrypt
@@ -928,5 +938,7 @@ interface SessionCallback {
     fun onImageRejected(reason: String) {}
     fun onImageSendFailed(reason: String) {}
     fun onMediaTransferProgress(hash: String, transferred: Long, total: Long) {}
+    fun onMediaTransferProgress(hash: String, fileName: String?, transferred: Long, total: Long) =
+        onMediaTransferProgress(hash, transferred, total)
     fun isDeviceAwake(): Boolean = true
 }

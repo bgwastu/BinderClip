@@ -47,8 +47,6 @@ class MainViewModel : ViewModel() {
     private val _imageSyncEnabled = MutableStateFlow(false)
     val imageSyncEnabled: StateFlow<Boolean> = _imageSyncEnabled.asStateFlow()
 
-    private val _mediaOverlayEnabled = MutableStateFlow(false)
-    val mediaOverlayEnabled: StateFlow<Boolean> = _mediaOverlayEnabled.asStateFlow()
 
     private val _autoCopyAccessibilityEnabled = MutableStateFlow(false)
     val autoCopyAccessibilityEnabled: StateFlow<Boolean> = _autoCopyAccessibilityEnabled.asStateFlow()
@@ -65,14 +63,12 @@ class MainViewModel : ViewModel() {
         autoCopyEnabled: Boolean = false,
         imageSyncEnabled: Boolean = false,
         hideClipboardEnabled: Boolean = false,
-        mediaOverlayEnabled: Boolean = false
     ) {
         this.macs = macs
         refreshPairedState()
         _autoClearEnabled.value = autoClearEnabled
         _autoCopyEnabled.value = autoCopyEnabled
         _imageSyncEnabled.value = imageSyncEnabled
-        _mediaOverlayEnabled.value = mediaOverlayEnabled
         _hideClipboardEnabled.value = hideClipboardEnabled
     }
 
@@ -149,9 +145,6 @@ class MainViewModel : ViewModel() {
         _imageSyncEnabled.value = enabled
     }
 
-    fun onMediaOverlaySettingChanged(enabled: Boolean) {
-        _mediaOverlayEnabled.value = enabled
-    }
 
     fun onAccessibilityStateChanged(enabled: Boolean) {
         _autoCopyAccessibilityEnabled.value = enabled

@@ -1769,7 +1769,7 @@ class SessionTest {
     /** Wraps the env in a data class so we can destructure it. */
     data class SessionEnvHolder(val env: SessionEnv)
 
-    private fun createPairedSessions(sharedSecretHex: String): SessionEnvHolder {
+    private fun createPairedSessions(sharedSecretHex: String, richMediaEnabled: Boolean = false): SessionEnvHolder {
         // Mac → Android pipe
         val macToAndroidOut = PipedOutputStream()
         val macToAndroidIn = PipedInputStream(macToAndroidOut)
@@ -1794,7 +1794,8 @@ class SessionTest {
             output = androidToMacOut,
             isInitiator = false,
             callback = androidCallback,
-            sharedSecretHex = sharedSecretHex
+            sharedSecretHex = sharedSecretHex,
+            settingsProvider = TestSettingsProvider(enabled = richMediaEnabled, changedAt = 1)
         )
 
         return SessionEnvHolder(SessionEnv(macSession, androidSession, macCallback, androidCallback))

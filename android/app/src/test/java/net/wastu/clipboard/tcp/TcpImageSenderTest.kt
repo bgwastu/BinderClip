@@ -1,9 +1,12 @@
 package net.wastu.clipboard.tcp
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class TcpImageSenderTest {
 
@@ -30,6 +33,33 @@ class TcpImageSenderTest {
             TcpImageSender.send("127.0.0.1", server.localPort, payload)
 
             serverThread.join(5000)
+            assertArrayEquals(payload, received)
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun senderTransfersExactly20MiB() {
+        val payload = ByteArray(20_971_520) { (it * 31).toByte() }
+        val server = ServerSocket(0)
+        val received = ByteArray(payload.size)
+        val complete = CountDownLatch(1)
+        try {
+            Thread {
+                server.accept().use { client ->
+                    val input = client.getInputStream()
+                    var offset = 0
+                    while (offset < received.size) {
+                        val count = input.read(received, offset, received.size - offset)
+                        if (count < 0) return@Thread
+                        offset += count
+                    }
+                    complete.countDown()
+                }
+            }.start()
+            TcpImageSender.send("127.0.0.1", server.localPort, payload)
+            assertTrue("20 MiB TCP transfer should complete", complete.await(30, TimeUnit.SECONDS))
             assertArrayEquals(payload, received)
         } finally {
             server.close()

@@ -78,6 +78,7 @@ class ClipboardService : Service(), L2capServerCallback {
         const val ACTION_PUSH_IMAGE = "net.wastu.clipboard.action.PUSH_IMAGE"
         const val EXTRA_IMAGE_PATH = "extra_image_path"
         const val EXTRA_MIME_TYPE = "extra_mime_type"
+        const val EXTRA_IMAGE_NAME = "extra_image_name"
         const val ACTION_RICH_MEDIA_SETTING_CHANGED = "net.wastu.clipboard.action.RICH_MEDIA_SETTING_CHANGED"
         const val EXTRA_RICH_MEDIA_ENABLED = "extra_rich_media_enabled"
 
@@ -195,6 +196,8 @@ class ClipboardService : Service(), L2capServerCallback {
         override fun onImageSendFailed(reason: String) = handleImageSendFailed(reason)
         override fun onMediaTransferProgress(hash: String, transferred: Long, total: Long) =
             handleMediaTransferProgress(hash, transferred, total)
+        override fun onMediaTransferProgress(hash: String, fileName: String?, transferred: Long, total: Long) =
+            handleMediaTransferProgress(hash, fileName, transferred, total)
         override fun isDeviceAwake(): Boolean = isDeviceAwakeNow()
     }
 
@@ -240,6 +243,10 @@ class ClipboardService : Service(), L2capServerCallback {
         clipboardSettingsStore = ClipboardSettingsStore(this)
         pairingStore = PairingStore(this)
         mediaOverlay = MediaTransferOverlay(this)
+        mediaOverlay.onCancel = {
+            readySessions().forEach { it.session?.cancelMediaTransfer() }
+            mediaOverlay.dismiss()
+        }
 
         loadPairingState()
         DebugSmokeProbe.reset(this)
@@ -342,9 +349,10 @@ class ClipboardService : Service(), L2capServerCallback {
             ACTION_PUSH_IMAGE -> {
                 val imagePath = intent.getStringExtra(EXTRA_IMAGE_PATH)
                 val mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "application/octet-stream"
+                val fileName = intent.getStringExtra(EXTRA_IMAGE_NAME)
                 if (imagePath != null) {
                     executor.execute {
-                        pushImageToMac(imagePath, mimeType)
+                        pushImageToMac(imagePath, mimeType, fileName)
                     }
                 }
             }
@@ -722,9 +730,14 @@ class ClipboardService : Service(), L2capServerCallback {
         }
     }
 
-    private fun handleMediaTransferProgress(hash: String, transferred: Long, total: Long) {
-        if (!clipboardSettingsStore.isMediaOverlayEnabled()) return
-        Handler(Looper.getMainLooper()).post { mediaOverlay.update(transferred, total) }
+    private fun handleMediaTransferProgress(hash: String, transferred: Long, total: Long) =
+        handleMediaTransferProgress(hash, null, transferred, total)
+
+    private fun handleMediaTransferProgress(hash: String, fileName: String?, transferred: Long, total: Long) {
+        Handler(Looper.getMainLooper()).post {
+            if (total > 0 && transferred >= total) mediaOverlay.dismiss()
+            else mediaOverlay.update(fileName, transferred, total)
+        }
         val intent = Intent(ACTION_CLIPBOARD_TRANSFER).apply {
             setPackage(packageName)
             putExtra("media_progress_hash", hash)
@@ -786,7 +799,7 @@ class ClipboardService : Service(), L2capServerCallback {
         readySessions().forEach { it.session?.openUrl(url) }
     }
 
-    private fun pushImageToMac(imagePath: String, mimeType: String) {
+    private fun pushImageToMac(imagePath: String, mimeType: String, fileName: String? = null) {
         if (isDestroyed) return
         val file = java.io.File(imagePath)
         if (!file.exists()) {
@@ -822,7 +835,8 @@ class ClipboardService : Service(), L2capServerCallback {
             return
         }
 
-        targets.forEach { it.session?.sendImage(imageData, mimeType) }
+        val displayName = fileName ?: file.name.removePrefix("clipboard_media_").removePrefix("share_media_")
+        targets.forEach { it.session?.sendImage(imageData, mimeType, displayName) }
         Log.w(TAG, "Queued image for send to ${targets.size} Mac(s) (${imageData.size} bytes, $mimeType)")
     }
 

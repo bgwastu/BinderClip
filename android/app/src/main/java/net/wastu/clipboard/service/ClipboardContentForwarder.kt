@@ -73,6 +73,7 @@ internal object ClipboardContentForwarder {
                 action = ClipboardService.ACTION_PUSH_IMAGE
                 putExtra(ClipboardService.EXTRA_IMAGE_PATH, cacheFile.absolutePath)
                 putExtra(ClipboardService.EXTRA_MIME_TYPE, mimeType)
+                putExtra(ClipboardService.EXTRA_IMAGE_NAME, "Clipboard media")
             }
             ContextCompat.startForegroundService(context, pushIntent)
             Log.d(tag, "Forwarded clipboard media to service (${cacheFile.length()} bytes, $mimeType)")

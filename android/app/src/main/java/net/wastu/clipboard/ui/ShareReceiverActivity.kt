@@ -131,6 +131,10 @@ open class ShareReceiverActivity : AppCompatActivity() {
             action = ClipboardService.ACTION_PUSH_IMAGE
             putExtra(ClipboardService.EXTRA_IMAGE_PATH, cacheFile.absolutePath)
             putExtra(ClipboardService.EXTRA_MIME_TYPE, mimeType)
+            putExtra(ClipboardService.EXTRA_IMAGE_NAME, uris.firstOrNull()?.let { contentResolver.query(it, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (cursor.moveToFirst() && nameIndex >= 0) cursor.getString(nameIndex) else null
+            } } ?: "Shared media")
         }
         runCatching {
             ContextCompat.startForegroundService(this, serviceIntent)

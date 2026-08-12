@@ -9,9 +9,11 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Button
 
 /** Small opt-in always-on-top progress surface for media transfers. */
 class MediaTransferOverlay(context: Context) {
+    var onCancel: (() -> Unit)? = null
     private val appContext = context.applicationContext
     private val windowManager = appContext.getSystemService(WindowManager::class.java)
     private val container = LinearLayout(appContext).apply {
@@ -27,11 +29,16 @@ class MediaTransferOverlay(context: Context) {
     private var attached = false
 
     init {
+        val cancel = Button(appContext).apply {
+            text = "Cancel"
+            setOnClickListener { onCancel?.invoke() }
+        }
         container.addView(label, LinearLayout.LayoutParams(-1, -2))
         container.addView(progress, LinearLayout.LayoutParams(420, 12).apply { topMargin = 12 })
+        container.addView(cancel, LinearLayout.LayoutParams(-1, -2))
     }
 
-    fun update(transferred: Long, total: Long) {
+    fun update(fileName: String?, transferred: Long, total: Long) {
         if (!Settings.canDrawOverlays(appContext)) return
         if (!attached) {
             val params = WindowManager.LayoutParams(
@@ -47,7 +54,7 @@ class MediaTransferOverlay(context: Context) {
             attached = true
         }
         val percent = if (total > 0) (transferred * 100 / total).coerceIn(0, 100) else 0
-        label.text = "Media sync  $percent%"
+        label.text = "${fileName ?: "Media sync"}  $percent%"
         progress.max = 100
         progress.progress = percent.toInt()
     }

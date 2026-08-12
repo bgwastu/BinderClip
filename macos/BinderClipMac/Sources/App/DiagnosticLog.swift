@@ -45,10 +45,8 @@ final class DiagnosticLog {
         self.previousFileURL = directory?.appendingPathComponent("diagnostics.1.log", isDirectory: false)
 
         // Stamp every session with app + OS context so a shared log is self-describing.
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        log("BinderClip \(version) (\(build)) — \(osVersion) — diagnostics session start", category: "App")
+        log("BinderClip — \(osVersion) — diagnostics session start", category: "App")
     }
 
     /// Record one diagnostic line. Safe to call from any thread; file I/O is async.

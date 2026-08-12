@@ -271,13 +271,6 @@ final class StatusBarController {
 
         menu.addItem(NSMenuItem.separator())
 
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        let versionItem = NSMenuItem(title: "BinderClip v\(version)", action: nil, keyEquivalent: "")
-        versionItem.isEnabled = false
-        menu.addItem(versionItem)
-
-        menu.addItem(NSMenuItem.separator())
-
         menu.addItem(NSMenuItem(
             title: "Quit BinderClip",
             action: #selector(NSApplication.terminate(_:)),

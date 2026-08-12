@@ -7,9 +7,15 @@ let package = Package(
     products: [
         .executable(name: "BinderClip", targets: ["BinderClip"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0")
+    ],
     targets: [
         .executableTarget(
             name: "BinderClip",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: ".",
             exclude: ["Tests"],
             resources: [.copy("Resources")]

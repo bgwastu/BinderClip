@@ -14,6 +14,7 @@ final class StatusBarController {
     var onSkipSecretsEnabled: (() -> Void)?
     var isImageSyncEnabled: (() -> Bool)?
     var isDeviceConnected: (() -> Bool)?
+    var onCheckForUpdates: (() -> Void)?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: 18)
     private let menu = NSMenu()
@@ -267,6 +268,14 @@ final class StatusBarController {
 
         menu.addItem(NSMenuItem.separator())
 
+        let updateItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(handleCheckForUpdates),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        menu.addItem(updateItem)
+
         menu.addItem(NSMenuItem(
             title: "Quit BinderClip",
             action: #selector(NSApplication.terminate(_:)),
@@ -361,6 +370,11 @@ final class StatusBarController {
             onSkipSecretsEnabled?()
         }
         renderMenu()
+    }
+
+    @objc
+    private func handleCheckForUpdates() {
+        onCheckForUpdates?()
     }
 
 

@@ -6,6 +6,7 @@ import CoreBluetooth
 import CryptoKit
 import os
 import ServiceManagement
+import Sparkle
 
 private let appLogger = Logger(subsystem: "net.wastu.clipboard", category: "App")
 
@@ -15,6 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let clipboardWriter = ClipboardWriter()
     private let notificationManager = ReceiveNotificationManager()
     private let pairingWindowController = PairingWindowController()
+    private lazy var updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     override init() {
         statusBarController = StatusBarController()
@@ -41,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pairingManager.removePendingDevices()
         enableLaunchAtLoginIfFirstRun()
         installSleepWakeObservers()
+        _ = updaterController
 
         statusBarController.onPairNewDeviceRequested = { [weak self] in
             self?.startPairing()
@@ -65,6 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusBarController.onToggleImageSync = { [weak self] in
             self?.connectionController?.toggleImageSync()
+        }
+        statusBarController.onCheckForUpdates = { [weak self] in
+            self?.updaterController.checkForUpdates(nil)
         }
         statusBarController.onSkipSecretsEnabled = { [weak self] in
             // Text cached for reconnect-replay while the filter was off may be a

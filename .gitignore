@@ -1,3 +1,5 @@
 android/.gradle/
 android/app/build/
 macos/**/.build/
+dist/
+dist-validation/

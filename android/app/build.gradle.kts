@@ -21,7 +21,8 @@ fun signingValue(propertyKey: String, envKey: String): String? {
 val releaseStoreFile = signingValue("storeFile", "CLIPBOARD_STORE_FILE")
 val releaseStorePassword = signingValue("storePassword", "CLIPBOARD_STORE_PASSWORD")
 val releaseKeyAlias = signingValue("keyAlias", "CLIPBOARD_KEY_ALIAS")
-val releaseKeyPassword = signingValue("keyPassword", "CLIPBOARD_KEY_PASSWORD")
+    ?: signingValue("keyAlias", "ANDROID_KEYSTORE_ALIAS")
+val releaseKeyPassword = releaseStorePassword
 
 val releaseSigningValues = listOf(
     releaseStoreFile,
@@ -36,8 +37,8 @@ val releaseSigningPartiallyConfigured = releaseSigningValues.any { it != null } 
 if (releaseSigningPartiallyConfigured) {
     throw GradleException(
         "Incomplete Android release signing configuration. " +
-            "Provide all values in android/keystore.properties (storeFile, storePassword, keyAlias, keyPassword) " +
-        "or via CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS, CLIPBOARD_KEY_PASSWORD."
+        "Provide all values in android/keystore.properties (storeFile, storePassword, keyAlias) " +
+        "or via CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS."
     )
 }
 
@@ -63,7 +64,8 @@ android {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
-        // Distribution metadata is intentionally unset until the distribution plan is defined.
+        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "0.1.0-dev"
 
         val gitHash = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")
@@ -147,8 +149,8 @@ gradle.taskGraph.whenReady {
     if (releaseTaskRequested && !releaseSigningConfigured) {
         throw GradleException(
             "Android release signing is not configured. " +
-                "Create android/keystore.properties (storeFile, storePassword, keyAlias, keyPassword) " +
-                "or set CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS, CLIPBOARD_KEY_PASSWORD."
+            "Create android/keystore.properties (storeFile, storePassword, keyAlias) " +
+                "or set CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS."
         )
     }
 

@@ -1,0 +1,66 @@
+name: Android Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BWS CLI
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/bitwarden/sdk-sm/releases/download/bws-v2.1.0/bws-x86_64-unknown-linux-gnu-2.1.0.zip \
+            --output bws.zip
+          unzip -q bws.zip
+          install -m 0755 bws /usr/local/bin/bws
+          rm -f bws.zip bws
+
+      - name: Load Android signing secrets
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          test -n "$BWS_ACCESS_TOKEN"
+          bws secret list 3e52cc46-2c42-4b3e-b909-b4a3002bc58f -o env > bws-android.env
+          sed -i.bak '/^BWS_ACCESS_TOKEN=/d' bws-android.env
+          while IFS='=' read -r key value; do
+            echo "::add-mask::$value"
+          done < bws-android.env
+          cat bws-android.env >> "$GITHUB_ENV"
+          rm -f bws-android.env bws-android.env.bak
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Restore release keystore
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/clipboard-release.keystore
+
+      - name: Build signed APK
+        env:
+          VERSION_NAME: ${{ github.ref_name }}
+          VERSION_CODE: ${{ github.run_number }}
+          CLIPBOARD_STORE_FILE: ${{ github.workspace }}/android/clipboard-release.keystore
+        run: |
+          export CLIPBOARD_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+          export CLIPBOARD_KEY_ALIAS="$ANDROID_KEYSTORE_ALIAS"
+          VERSION_NAME="${GITHUB_REF_NAME#v}" \
+          ./android/gradlew -p android :app:assembleRelease
+
+      - name: Rename APK
+        run: mv android/app/build/outputs/apk/release/app-release.apk "BinderClip-${GITHUB_REF_NAME#v}.apk"
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "BinderClip-${GITHUB_REF_NAME#v}.apk" --clobber

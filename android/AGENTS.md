@@ -1,3 +1,3 @@
 # Android AGENTS Instructions
 
-- Distribution metadata is intentionally unset for now. Do not add a user-facing app version until the distribution plan is defined.
+- Release builds receive `VERSION_NAME` and `VERSION_CODE` from CI; Android releases publish signed APKs to GitHub Releases for Obtainium.

@@ -4,7 +4,6 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.github.triplet.play")
 }
 
 val keystoreProperties = Properties()
@@ -41,20 +40,6 @@ if (releaseSigningPartiallyConfigured) {
         "or via CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS."
     )
 }
-
-val playProperties = Properties()
-val playPropertiesFile = rootProject.file("play.properties")
-if (playPropertiesFile.exists()) {
-    playPropertiesFile.inputStream().use { playProperties.load(it) }
-}
-
-fun playValue(propertyKey: String, envKey: String): String? {
-    val value = playProperties.getProperty(propertyKey) ?: System.getenv(envKey)
-    return value?.trim()?.takeIf { it.isNotEmpty() }
-}
-
-val playServiceAccountFile = playValue("serviceAccountCredentials", "PLAY_SERVICE_ACCOUNT_JSON")
-val playTrack = playValue("track", "PLAY_TRACK") ?: "internal"
 
 android {
     namespace = "net.wastu.clipboard"
@@ -124,26 +109,9 @@ android {
 
 }
 
-play {
-    defaultToAppBundles.set(true)
-    track.set(playTrack)
-    resolutionStrategy.set(com.github.triplet.gradle.androidpublisher.ResolutionStrategy.AUTO)
-
-    if (playServiceAccountFile != null) {
-        serviceAccountCredentials.set(rootProject.file(playServiceAccountFile))
-    }
-}
-
 gradle.taskGraph.whenReady {
     val releaseTaskRequested = allTasks.any { task ->
         task.project == project && task.name.contains("Release", ignoreCase = true)
-    }
-
-    val playPublishTaskRequested = allTasks.any { task ->
-        task.project == project && (
-            task.name.contains("publish", ignoreCase = true) ||
-                task.name.contains("promote", ignoreCase = true)
-            )
     }
 
     if (releaseTaskRequested && !releaseSigningConfigured) {
@@ -154,22 +122,6 @@ gradle.taskGraph.whenReady {
         )
     }
 
-    if (playPublishTaskRequested) {
-        if (playServiceAccountFile == null) {
-            throw GradleException(
-                "Google Play publishing credentials are not configured. " +
-                    "Create android/play.properties with serviceAccountCredentials=<path-to-json> " +
-                    "or set PLAY_SERVICE_ACCOUNT_JSON."
-            )
-        }
-
-        val credentialsFile = rootProject.file(playServiceAccountFile)
-        if (!credentialsFile.exists()) {
-            throw GradleException(
-                "Google Play service account file not found at ${credentialsFile.path}."
-            )
-        }
-    }
 }
 
 dependencies {

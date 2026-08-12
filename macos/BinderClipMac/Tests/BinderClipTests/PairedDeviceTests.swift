@@ -63,6 +63,13 @@ final class PairedDeviceTests: XCTestCase {
         XCTAssertNil(device.advertTagHex)
     }
 
+    func testAddressesRoundTrip() throws {
+        var device = PairedDevice(sharedSecret: "aabb", displayName: "Test", datePaired: Date())
+        device.addresses = ["192.168.1.10"]
+        let decoded = try JSONDecoder().decode(PairedDevice.self, from: JSONEncoder().encode(device))
+        XCTAssertEqual(decoded.addresses, ["192.168.1.10"])
+    }
+
     func testAdvertTagRoundTrip() throws {
         let device = PairedDevice(sharedSecret: "aabb", displayName: "Test", datePaired: Date(),
                                   advertTagHex: "0011223344556677")

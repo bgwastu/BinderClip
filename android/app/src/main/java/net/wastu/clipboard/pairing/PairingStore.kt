@@ -20,7 +20,8 @@ internal fun deviceTagHex(secretHex: String): String =
 data class PairedMac(
     val secretHex: String,
     val name: String?,
-    val pairedAtMs: Long
+    val pairedAtMs: Long,
+    val addresses: List<String> = emptyList()
 ) {
     val id: String by lazy { deviceTagHex(secretHex) }
 }
@@ -74,7 +75,9 @@ class PairingStore internal constructor(private val encryptedPrefs: SharedPrefer
                 PairedMac(
                     secretHex = secret,
                     name = obj.optString("name").takeIf { it.isNotEmpty() },
-                    pairedAtMs = obj.optLong("pairedAt", 0L)
+                    pairedAtMs = obj.optLong("pairedAt", 0L),
+                    addresses = (0 until (obj.optJSONArray("addresses")?.length() ?: 0))
+                        .mapNotNull { obj.optJSONArray("addresses")?.optString(it)?.takeIf(String::isNotBlank) }
                 )
             }
         }.getOrDefault(emptyList())
@@ -115,6 +118,14 @@ class PairingStore internal constructor(private val encryptedPrefs: SharedPrefer
         val macs = loadPairedMacs()
         if (macs.none { it.secretHex == secretHex && it.name != name }) return
         val updated = macs.map { if (it.secretHex == secretHex) it.copy(name = name) else it }
+        runCatching { prefs.edit().putString(KEY_PAIRED_MACS, encode(updated)).apply() }
+    }
+
+    fun updateMacAddresses(secretHex: String, addresses: List<String>) {
+        val prefs = encryptedPrefs ?: return
+        val updated = loadPairedMacs().map {
+            if (it.secretHex == secretHex) it.copy(addresses = addresses.distinct()) else it
+        }
         runCatching { prefs.edit().putString(KEY_PAIRED_MACS, encode(updated)).apply() }
     }
 
@@ -209,6 +220,7 @@ class PairingStore internal constructor(private val encryptedPrefs: SharedPrefer
                 put("secret", mac.secretHex)
                 mac.name?.let { put("name", it) }
                 put("pairedAt", mac.pairedAtMs)
+                put("addresses", JSONArray(mac.addresses))
             })
         }
         return array.toString()

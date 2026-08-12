@@ -16,16 +16,18 @@ struct PairedDevice: Codable, Equatable {
     /// during pairing). nil for pre-multi-Mac pairings — fall back to the
     /// secret-derived tag, which is what those phones advertise.
     var advertTagHex: String?
+    var addresses: [String]
 
     init(sharedSecret: String, displayName: String, datePaired: Date,
          richMediaEnabled: Bool = false, richMediaEnabledChangedAt: Int64 = 0,
-         advertTagHex: String? = nil) {
+         advertTagHex: String? = nil, addresses: [String] = []) {
         self.sharedSecret = sharedSecret
         self.displayName = displayName
         self.datePaired = datePaired
         self.richMediaEnabled = richMediaEnabled
         self.richMediaEnabledChangedAt = richMediaEnabledChangedAt
         self.advertTagHex = advertTagHex
+        self.addresses = addresses
     }
 
     // Custom decoding to handle existing data without the new fields
@@ -37,6 +39,7 @@ struct PairedDevice: Codable, Equatable {
         richMediaEnabled = try container.decodeIfPresent(Bool.self, forKey: .richMediaEnabled) ?? false
         richMediaEnabledChangedAt = try container.decodeIfPresent(Int64.self, forKey: .richMediaEnabledChangedAt) ?? 0
         advertTagHex = try container.decodeIfPresent(String.self, forKey: .advertTagHex)
+        addresses = try container.decodeIfPresent([String].self, forKey: .addresses) ?? []
     }
 }
 
@@ -109,6 +112,13 @@ final class PairingManager {
         guard let index = devices.firstIndex(where: { $0.sharedSecret == secret }) else { return }
         devices[index].richMediaEnabled = enabled
         devices[index].richMediaEnabledChangedAt = changedAt
+        persist(devices)
+    }
+
+    func updateAddresses(_ addresses: [String], forSecret secret: String) {
+        var devices = loadDevices()
+        guard let index = devices.firstIndex(where: { $0.sharedSecret == secret }) else { return }
+        devices[index].addresses = addresses.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
         persist(devices)
     }
 

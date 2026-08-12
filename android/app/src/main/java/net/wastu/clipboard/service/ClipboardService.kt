@@ -39,6 +39,7 @@ import net.wastu.clipboard.protocol.Session
 import net.wastu.clipboard.protocol.SessionCallback
 import net.wastu.clipboard.protocol.SessionMode
 import net.wastu.clipboard.protocol.VersionMismatchException
+import net.wastu.clipboard.tcp.TcpControlTransport
 import net.wastu.clipboard.settings.ClipboardSettingsStore
 import java.io.IOException
 import java.security.MessageDigest
@@ -116,6 +117,7 @@ class ClipboardService : Service(), L2capServerCallback {
     // BLE components
     private var advertiser: Advertiser? = null
     private var l2capServer: L2capServer? = null
+    private var tcpTransport: TcpControlTransport? = null
 
     // Active L2CAP sessions, one per connected Mac (guarded by sessionLock).
     private val sessionLock = Any()
@@ -172,6 +174,7 @@ class ClipboardService : Service(), L2capServerCallback {
     private inner class SessionHandle : SessionCallback {
         @Volatile var session: Session? = null
         @Volatile var thread: Thread? = null
+        @Volatile var isTcp = false
         /** Shared secret of the Mac on this connection (after handshake/pairing). */
         @Volatile var secretHex: String? = null
         @Volatile var ready = false
@@ -216,6 +219,16 @@ class ClipboardService : Service(), L2capServerCallback {
         }
         anyMacConnected = false
         snapshot.forEach { it.close() }
+    }
+
+    private fun closeBleSessions() {
+        val snapshot = synchronized(sessionLock) {
+            val copy = sessions.filterNot { it.isTcp }
+            sessions.removeAll(copy.toSet())
+            copy
+        }
+        snapshot.forEach { it.close() }
+        synchronized(sessionLock) { anyMacConnected = sessions.any { it.ready } }
     }
 
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
@@ -292,6 +305,8 @@ class ClipboardService : Service(), L2capServerCallback {
         executor.shutdownNow()
         mediaOverlay.dismiss()
         stopBleComponents()
+        tcpTransport?.close()
+        tcpTransport = null
         super.onDestroy()
     }
 
@@ -385,6 +400,7 @@ class ClipboardService : Service(), L2capServerCallback {
     // ── BLE stack management ──────────────────────────────────────────
 
     private fun ensureBleComponentsState(restartIfRunning: Boolean = false) {
+        ensureTcpFallback()
         if (!isPaired && !pairingInProgress) {
             if (bleStarted) {
                 Log.w(TAG, "Shared secret missing; stopping BLE components")
@@ -410,6 +426,32 @@ class ClipboardService : Service(), L2capServerCallback {
         }
 
         startBle()
+    }
+
+    private fun ensureTcpFallback() {
+        if (!isPaired) return
+        if (tcpTransport == null) {
+            tcpTransport = TcpControlTransport { socket -> onTcpSocket(socket) }.also { it.start() }
+        }
+        pairingStore.loadPairedMacs().forEach { mac ->
+            tcpTransport?.connect(mac.addresses) { _, socket -> onTcpSocket(socket, mac.secretHex, true) }
+        }
+    }
+
+    private fun onTcpSocket(socket: java.net.Socket, secret: String? = null, initiator: Boolean = false) {
+        val handle = SessionHandle()
+        handle.isTcp = true
+        val session = Session(socket.getInputStream(), socket.getOutputStream(), initiator, handle,
+            sharedSecretHex = secret,
+            settingsProvider = pairingStore,
+            candidateSecretsHex = pairingStore.loadPairedMacs().map { it.secretHex })
+        session.localName = localDeviceName()
+        handle.session = session
+        synchronized(sessionLock) { sessions.add(handle) }
+        handle.thread = Thread({ session.performHandshake(); session.listenForMessages() }, "TCP-Session").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun startBle() {
@@ -478,14 +520,13 @@ class ClipboardService : Service(), L2capServerCallback {
 
     private fun stopBleComponents(broadcastDisconnected: Boolean = true) {
         // Tear down all active sessions
-        closeAllSessions()
+        closeBleSessions()
 
         // Stop BLE stack
         advertiser?.stop()
         advertiser = null
         l2capServer?.stop()
         l2capServer = null
-
         bleStarted = false
         if (broadcastDisconnected) {
             sendConnectionBroadcast(false)
@@ -617,6 +658,7 @@ class ClipboardService : Service(), L2capServerCallback {
             pairingStore.updateMacName(secret, remoteName)
             saveConnectedDeviceName(remoteName)
         }
+        if (secret != null) pairingStore.updateMacAddresses(secret, session?.remoteAddresses ?: emptyList())
         publishDirectShareShortcut(directShareLabel())
 
         broadcastConnectionState()

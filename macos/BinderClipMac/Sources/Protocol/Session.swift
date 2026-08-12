@@ -86,6 +86,8 @@ final class Session {
 
     /// Remote device name received during handshake. Available after sessionDidBecomeReady.
     private(set) var remoteName: String?
+    private(set) var matchedSecretHex: String?
+    private(set) var remoteAddresses: [String] = []
 
     /// Phone identity tag (16-char hex) received in KEY_EXCHANGE during pairing.
     /// nil when the phone has no other paired Macs (first pairing).
@@ -115,6 +117,7 @@ final class Session {
 
     /// Shared secret hex string for deriving auth and session keys.
     private var sharedSecretHex: String?
+    private let candidateSecretHexes: [String]
 
     /// Auth key derived from the shared secret, used for HMAC authentication during handshake.
     private var authKey: SymmetricKey?
@@ -126,15 +129,18 @@ final class Session {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
 
     init(inputStream: InputStream, outputStream: OutputStream,
-         isInitiator: Bool, delegate: SessionDelegate,
-         mode: SessionMode = .normal,
-         sharedSecretHex: String? = nil) {
+          isInitiator: Bool, delegate: SessionDelegate,
+          mode: SessionMode = .normal,
+          sharedSecretHex: String? = nil,
+          candidateSecretHexes: [String] = []) {
         self.inputStream = inputStream
         self.outputStream = outputStream
         self.isInitiator = isInitiator
         self.mode = mode
         self.delegate = delegate
         self.sharedSecretHex = sharedSecretHex
+        self.candidateSecretHexes = candidateSecretHexes
+        self.matchedSecretHex = sharedSecretHex
 
         // Derive auth key from shared secret if available
         if let hex = sharedSecretHex, let secretBytes = E2ECrypto.hexToData(hex) {
@@ -892,7 +898,8 @@ final class Session {
     }
 
     private func helloPayload() -> Data {
-        var obj: [String: Any] = ["version": 2]
+        var obj: [String: Any] = ["version": 2,
+                                   "addresses": LocalNetworkAddress.getLocalIPv4Addresses()]
         if let name = localName {
             obj["name"] = name
         }
@@ -931,6 +938,7 @@ final class Session {
             throw SessionError.versionMismatch(version)
         }
         remoteName = json["name"] as? String
+        remoteAddresses = (json["addresses"] as? [String])?.filter { !$0.isEmpty } ?? []
 
         // Validate ephemeral key
         guard let ekHex = json["ek"] as? String,
@@ -949,11 +957,21 @@ final class Session {
         guard let authBytes = E2ECrypto.hexToData(authHex) else {
             throw SessionError.protocolError("Authentication failed")
         }
-        guard let authKey = authKey else {
-            throw SessionError.protocolError("No auth key for validation")
-        }
-        guard E2ECrypto.verifyAuth(publicKeyBytes: remoteEkBytes, authKey: authKey, expected: authBytes) else {
-            throw SessionError.protocolError("Authentication failed")
+        if let authKey {
+            guard E2ECrypto.verifyAuth(publicKeyBytes: remoteEkBytes, authKey: authKey, expected: authBytes) else {
+                throw SessionError.protocolError("Authentication failed")
+            }
+        } else {
+            guard let match = candidateSecretHexes.first(where: { secret in
+                guard let bytes = E2ECrypto.hexToData(secret),
+                      let key = E2ECrypto.deriveAuthKey(secretBytes: bytes) else { return false }
+                return E2ECrypto.verifyAuth(publicKeyBytes: remoteEkBytes, authKey: key, expected: authBytes)
+            }), let bytes = E2ECrypto.hexToData(match) else {
+                throw SessionError.protocolError("Authentication failed")
+            }
+            sharedSecretHex = match
+            matchedSecretHex = match
+            self.authKey = E2ECrypto.deriveAuthKey(secretBytes: bytes)
         }
 
         // Resolve settings with last-write-wins

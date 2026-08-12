@@ -177,6 +177,7 @@ class ConnectionController: NSObject {
     // MARK: Timers
 
     private var healthCheckTimer: DispatchSourceTimer?
+    private var tcpTransport: TcpControlTransport?
 
     // MARK: Pairing
 
@@ -210,6 +211,7 @@ class ConnectionController: NSObject {
         self.pairingManager = pairingManager
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: queue)
+        startTCPFallback()
         startHealthCheck()
     }
 
@@ -221,6 +223,39 @@ class ConnectionController: NSObject {
             centralManager = CBCentralManager(delegate: self, queue: queue)
             startHealthCheck()
         }
+        startTCPFallback()
+    }
+
+    private func startTCPFallback() {
+        let transport = TcpControlTransport()
+        transport.onConnection = { [weak self] input, output in
+            self?.queue.async { self?.startTCP(input: input, output: output) }
+        }
+        transport.onOutgoingConnection = { [weak self] input, output in
+            self?.queue.async { self?.startTCP(input: input, output: output, isInitiator: true) }
+        }
+        tcpTransport = transport
+        transport.start()
+        pairingManager.loadDevices().forEach { transport.connect(addresses: $0.addresses) }
+    }
+
+    private func startTCP(input: InputStream, output: OutputStream, isInitiator: Bool = false) {
+        let paired = pairingManager.loadDevices()
+        guard !paired.isEmpty else { input.close(); output.close(); return }
+        let device = paired.first!
+        let adapter = SessionAdapter(controller: self, generation: generation)
+        let provider = DeviceSettingsProvider(pairingManager: pairingManager, secret: device.sharedSecret)
+        let session = Session(inputStream: input, outputStream: output, isInitiator: isInitiator,
+                              delegate: adapter, sharedSecretHex: isInitiator ? device.sharedSecret : nil,
+                              candidateSecretHexes: isInitiator ? [] : paired.map(\.sharedSecret))
+        session.localName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        session.settingsProvider = provider
+        let record = devices[device.sharedSecret] ?? DeviceConnection(token: device.sharedSecret)
+        devices[device.sharedSecret] = record
+        record.adapter = adapter
+        record.settingsProvider = provider
+        record.state = .handshaking(session)
+        Thread { session.performHandshake(); session.listenForMessages() }.start()
     }
 
     // MARK: - Logging
@@ -438,6 +473,7 @@ class ConnectionController: NSObject {
     /// context when requested so pairing resumes once BT returns.
     private func teardownAll(reason: String, preservePairingContext: Bool) {
         log("[\(reason)] tearing down all connections")
+        if reason == "disconnect" { tcpTransport?.close(); tcpTransport = nil }
         for device in devices.values {
             closeConnection(of: device)
             device.backoff.reset()
@@ -1097,23 +1133,26 @@ extension ConnectionController {
             log("Stale sessionReady, ignoring")
             return
         }
+        let resolvedDevice = session.matchedSecretHex.flatMap { devices[$0] } ?? device
         let remoteName = session.remoteName
         // Update stored device name
         if let name = remoteName {
             let stored = pairingManager.loadDevices()
-            if let existing = stored.first(where: { $0.sharedSecret == device.token && $0.displayName != name }) {
-                pairingManager.removeDevice(secret: device.token)
+            if let existing = stored.first(where: { $0.sharedSecret == resolvedDevice.token && $0.displayName != name }) {
+                pairingManager.removeDevice(secret: resolvedDevice.token)
                 let updated = PairedDevice(sharedSecret: existing.sharedSecret, displayName: name,
-                                           datePaired: existing.datePaired,
-                                           richMediaEnabled: existing.richMediaEnabled,
-                                           richMediaEnabledChangedAt: existing.richMediaEnabledChangedAt,
-                                           advertTagHex: existing.advertTagHex)
+                                            datePaired: existing.datePaired,
+                                            richMediaEnabled: existing.richMediaEnabled,
+                                            richMediaEnabledChangedAt: existing.richMediaEnabledChangedAt,
+                                            advertTagHex: existing.advertTagHex,
+                                            addresses: existing.addresses)
                 pairingManager.addDevice(updated)
             }
         }
-        device.state = .ready(session)
-        device.backoff.reset()
-        device.nextAttemptAt = .distantPast
+        pairingManager.updateAddresses(session.remoteAddresses, forSecret: resolvedDevice.token)
+        resolvedDevice.state = .ready(session)
+        resolvedDevice.backoff.reset()
+        resolvedDevice.nextAttemptAt = .distantPast
         log("Session ready — remote: \(remoteName ?? "unknown") (\(connectedReadyCount()) connected)")
         notifyConnectionChanged()
         ensureScanning()

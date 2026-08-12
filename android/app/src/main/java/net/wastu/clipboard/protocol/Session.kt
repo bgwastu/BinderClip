@@ -81,6 +81,9 @@ class Session(
     var remoteName: String? = null
         private set
 
+    var remoteAddresses: List<String> = emptyList()
+        private set
+
     /**
      * The shared secret this session ended up using. With [candidateSecretsHex]
      * this identifies which Mac connected. Available after onSessionReady.
@@ -800,6 +803,7 @@ class Session(
         val json = JSONObject()
         json.put("version", 2)
         localName?.let { json.put("name", it) }
+        json.put("addresses", NetworkUtil.getLocalIpAddresses())
 
         // Include ephemeral key and auth for v2 handshake (Normal mode only)
         val ak = authKey
@@ -835,6 +839,8 @@ class Session(
             throw VersionMismatchException(version)
         }
         remoteName = if (json.has("name")) json.getString("name") else null
+        remoteAddresses = (0 until (json.optJSONArray("addresses")?.length() ?: 0))
+            .mapNotNull { json.optJSONArray("addresses")?.optString(it)?.takeIf(String::isNotBlank) }
 
         // Validate ephemeral key
         val ekHex = json.optString("ek", "")

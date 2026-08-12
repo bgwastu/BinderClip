@@ -483,7 +483,9 @@ class Session(
                 for (host in tcpHosts) {
                     for (attempt in 1..2) {
                         try {
-                            TcpImageSender.send(host, tcpPort, encrypted, nonce = tcpNonce)
+                             TcpImageSender.send(host, tcpPort, encrypted, nonce = tcpNonce) { sent, total ->
+                                 callback.onMediaTransferProgress(hash, sent, total)
+                             }
                             lastError = null
                             break
                         } catch (e: Exception) {
@@ -557,7 +559,7 @@ class Session(
             return
         }
 
-        // Check size <= 10MB
+        // Check size <= 20 MiB
         val maxSize = 20 * 1024 * 1024
         if (size > maxSize) {
             val rejectJson = JSONObject().apply {
@@ -601,7 +603,9 @@ class Session(
             MessageCodec.write(output, Message(MessageType.ACCEPT, acceptJson.toString().toByteArray()))
 
             // Await TCP data
-            val encrypted = receiver.receive()
+            val encrypted = receiver.receive { received, total ->
+                callback.onMediaTransferProgress(hash, received, total)
+            }
 
             // Decrypt
             val key = sessionKey ?: throw ProtocolException("No session key available")
@@ -923,5 +927,6 @@ interface SessionCallback {
     fun onImageReceived(data: ByteArray, contentType: String, hash: String) {}
     fun onImageRejected(reason: String) {}
     fun onImageSendFailed(reason: String) {}
+    fun onMediaTransferProgress(hash: String, transferred: Long, total: Long) {}
     fun isDeviceAwake(): Boolean = true
 }

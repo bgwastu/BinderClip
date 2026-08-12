@@ -5,7 +5,7 @@
         <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
     </share-target>
     <share-target android:targetClass="net.wastu.clipboard.ui.ShareReceiverActivity">
-        <data android:mimeType="image/*" />
+        <data android:mimeType="*/*" />
         <data android:mimeType="text/*" />
         <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
     </share-target>

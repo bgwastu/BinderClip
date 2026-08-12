@@ -43,8 +43,8 @@
     <string name="tile_label">Send to Mac</string>
     <string name="tile_not_paired">Not paired</string>
     <string name="auto_copy_needs_accessibility">Not working — tap to enable Accessibility permission</string>
-    <string name="image_sync_setting_title">Image sync (experimental)</string>
-    <string name="image_sync_setting_subtitle">Sync clipboard images. Requires devices to be on the same Wi-Fi.</string>
+    <string name="media_sync_setting_title">Media sync (experimental)</string>
+    <string name="media_sync_setting_subtitle">Sync images, HEIC, Live Photos, and videos losslessly up to 20 MB. Requires the same Wi-Fi.</string>
     <string name="accessibility_disclosure_title">Accessibility Permission</string>
     <string name="accessibility_disclosure_body">BinderClip uses Android\'s Accessibility Service to detect when you copy text, so it can automatically send your clipboard to your paired Mac.\n\nThis permission allows BinderClip to monitor tap actions only. It does not read, collect, or store any screen content or personal data.</string>
     <string name="accessibility_disclosure_allow">Allow</string>

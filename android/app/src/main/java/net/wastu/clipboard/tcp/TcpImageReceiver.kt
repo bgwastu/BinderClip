@@ -34,7 +34,7 @@ class TcpImageReceiver(
      * Blocks until [expectedSize] bytes are received from an allowed sender,
      * or throws [TcpTransferException] on error/timeout/cancel.
      */
-    fun receive(): ByteArray {
+    fun receive(onProgress: ((Long, Long) -> Unit)? = null): ByteArray {
         val server = serverSocket ?: throw TcpTransferException("Server not started")
 
         try {
@@ -82,7 +82,7 @@ class TcpImageReceiver(
                     }
 
                     client.soTimeout = transferTimeoutMs
-                    val data = readExactly(client.getInputStream(), expectedSize)
+                    val data = readExactly(client.getInputStream(), expectedSize, onProgress)
                     return data
                 } finally {
                     try { client.close() } catch (_: Exception) {}
@@ -109,7 +109,7 @@ class TcpImageReceiver(
         try { serverSocket?.close() } catch (_: Exception) {}
     }
 
-    private fun readExactly(input: InputStream, size: Int): ByteArray {
+    private fun readExactly(input: InputStream, size: Int, onProgress: ((Long, Long) -> Unit)? = null): ByteArray {
         val buffer = ByteArray(size)
         var offset = 0
         while (offset < size) {
@@ -121,6 +121,7 @@ class TcpImageReceiver(
                 )
             }
             offset += read
+            onProgress?.invoke(offset.toLong(), size.toLong())
         }
         return buffer
     }

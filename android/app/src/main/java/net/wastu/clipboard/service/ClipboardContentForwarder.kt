@@ -14,7 +14,6 @@ internal object ClipboardContentForwarder {
     const val MAX_MEDIA_BYTES = 20_971_520L
 
     fun forward(context: Context, clip: ClipData, description: ClipDescription?, tag: String): Boolean {
-        val item = clip.getItemAt(0)
         val mediaMimeType = description
             ?.takeIf { it.mimeTypeCount > 0 }
             ?.let { clipDescription ->
@@ -24,14 +23,21 @@ internal object ClipboardContentForwarder {
             }
 
         if (mediaMimeType != null) {
-            val uri = item.uri
-            if (uri == null) {
-                Log.w(tag, "Clipboard image has no readable URI")
-                return true
+            val items = buildList {
+                for (index in 0 until clip.itemCount) {
+                    val uri = clip.getItemAt(index).uri ?: continue
+                    val mimeType = context.contentResolver.getType(uri) ?: mediaMimeType
+                    val data = runCatching {
+                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    }.getOrNull() ?: continue
+                    if (data.isNotEmpty()) add(MediaBundle.Item(mimeType, data))
+                }
             }
-            return forwardMedia(context, uri, mediaMimeType, tag)
+            if (items.isEmpty()) return true
+            return forwardMedia(context, items, tag)
         }
 
+        val item = clip.getItemAt(0)
         val text = item.coerceToText(context)?.toString()
         if (text.isNullOrBlank()) {
             Log.d(tag, "Clipboard text empty")
@@ -47,24 +53,21 @@ internal object ClipboardContentForwarder {
         return true
     }
 
-    private fun forwardMedia(context: Context, uri: Uri, mimeType: String, tag: String): Boolean {
+    private fun forwardMedia(context: Context, items: List<MediaBundle.Item>, tag: String): Boolean {
         val cacheDir = File(context.cacheDir, "shared_images").apply { mkdirs() }
+        val mimeType = if (items.size == 1) items[0].mimeType else MediaBundle.MIME_TYPE
+        val data = runCatching {
+            if (items.size == 1) items[0].data else MediaBundle.encode(items)
+        }.getOrNull() ?: return true
         val extension = mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
-        val cacheFile = File(cacheDir, "clipboard_image_${System.currentTimeMillis()}.$extension")
+        val cacheFile = File(cacheDir, "clipboard_media_${System.currentTimeMillis()}.$extension")
 
         return try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                cacheFile.outputStream().use { output -> input.copyTo(output) }
-            } ?: run {
-                Log.w(tag, "Could not read clipboard image")
+            if (data.isEmpty() || data.size > MAX_MEDIA_BYTES) {
+                Log.w(tag, "Clipboard media too large or empty: ${data.size} bytes")
                 return true
             }
-
-            if (cacheFile.length() == 0L || cacheFile.length() > MAX_MEDIA_BYTES) {
-                Log.w(tag, "Clipboard media too large or empty: ${cacheFile.length()} bytes")
-                cacheFile.delete()
-                return true
-            }
+            cacheFile.writeBytes(data)
 
             val pushIntent = Intent(context, ClipboardService::class.java).apply {
                 action = ClipboardService.ACTION_PUSH_IMAGE
@@ -72,7 +75,7 @@ internal object ClipboardContentForwarder {
                 putExtra(ClipboardService.EXTRA_MIME_TYPE, mimeType)
             }
             ContextCompat.startForegroundService(context, pushIntent)
-            Log.d(tag, "Forwarded clipboard image to service (${cacheFile.length()} bytes, $mimeType)")
+            Log.d(tag, "Forwarded clipboard media to service (${cacheFile.length()} bytes, $mimeType)")
             true
         } catch (error: Exception) {
             cacheFile.delete()

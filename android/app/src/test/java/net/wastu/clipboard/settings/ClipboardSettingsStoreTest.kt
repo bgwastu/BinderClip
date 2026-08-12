@@ -14,4 +14,9 @@ class ClipboardSettingsStoreTest {
     fun `onboarding shown key is defined`() {
         assertEquals("auto_copy_onboarding_shown", ClipboardSettingsStore.KEY_AUTO_COPY_ONBOARDING_SHOWN)
     }
+
+    @Test
+    fun `media overlay key is defined`() {
+        assertEquals("media_overlay_enabled", ClipboardSettingsStore.KEY_MEDIA_OVERLAY_ENABLED)
+    }
 }

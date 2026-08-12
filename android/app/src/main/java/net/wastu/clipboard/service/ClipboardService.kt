@@ -133,6 +133,7 @@ class ClipboardService : Service(), L2capServerCallback {
     private lateinit var clipboardWriter: ClipboardWriter
     private lateinit var clipboardSettingsStore: ClipboardSettingsStore
     private lateinit var pairingStore: PairingStore
+    private lateinit var mediaOverlay: MediaTransferOverlay
     private val executor = Executors.newSingleThreadExecutor()
     private val clipboardAutoClearHandler = Handler(Looper.getMainLooper())
     private var pendingClipboardAutoClear: Runnable? = null
@@ -192,6 +193,8 @@ class ClipboardService : Service(), L2capServerCallback {
         override fun onImageReceived(data: ByteArray, contentType: String, hash: String) =
             handleImageReceived(data, contentType, hash)
         override fun onImageSendFailed(reason: String) = handleImageSendFailed(reason)
+        override fun onMediaTransferProgress(hash: String, transferred: Long, total: Long) =
+            handleMediaTransferProgress(hash, transferred, total)
         override fun isDeviceAwake(): Boolean = isDeviceAwakeNow()
     }
 
@@ -236,6 +239,7 @@ class ClipboardService : Service(), L2capServerCallback {
         clipboardWriter = ClipboardWriter(this)
         clipboardSettingsStore = ClipboardSettingsStore(this)
         pairingStore = PairingStore(this)
+        mediaOverlay = MediaTransferOverlay(this)
 
         loadPairingState()
         DebugSmokeProbe.reset(this)
@@ -279,6 +283,7 @@ class ClipboardService : Service(), L2capServerCallback {
             unregisterReceiver(bluetoothStateReceiver)
         }
         executor.shutdownNow()
+        mediaOverlay.dismiss()
         stopBleComponents()
         super.onDestroy()
     }
@@ -625,6 +630,7 @@ class ClipboardService : Service(), L2capServerCallback {
     private fun handleTransferComplete(hash: String) {
         Log.d(TAG, "Outbound transfer complete: $hash")
         sendClipboardTransferBroadcast(fromMac = false)
+        Handler(Looper.getMainLooper()).post { mediaOverlay.dismiss() }
     }
 
     private fun handleSessionError(handle: SessionHandle, error: Exception) {
@@ -715,11 +721,24 @@ class ClipboardService : Service(), L2capServerCallback {
         }
     }
 
+    private fun handleMediaTransferProgress(hash: String, transferred: Long, total: Long) {
+        if (!clipboardSettingsStore.isMediaOverlayEnabled()) return
+        Handler(Looper.getMainLooper()).post { mediaOverlay.update(transferred, total) }
+        val intent = Intent(ACTION_CLIPBOARD_TRANSFER).apply {
+            setPackage(packageName)
+            putExtra("media_progress_hash", hash)
+            putExtra("media_progress_transferred", transferred)
+            putExtra("media_progress_total", total)
+        }
+        sendBroadcast(intent)
+    }
+
     private fun handleImageReceived(data: ByteArray, contentType: String, hash: String) {
         lastReceivedImageHash = hash
         Log.w(TAG, "Received image from Mac (${data.size} bytes, $contentType)")
         clipboardWriter.writeMedia(data, contentType)
         sendClipboardTransferBroadcast(fromMac = true)
+        Handler(Looper.getMainLooper()).post { mediaOverlay.dismiss() }
     }
 
     private fun isDeviceAwakeNow(): Boolean {
@@ -797,7 +816,7 @@ class ClipboardService : Service(), L2capServerCallback {
         if (!pairingStore.isRichMediaEnabled()) {
             Log.w(TAG, "Rich media not enabled; cannot send image")
             Handler(Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(this, "Image sync is not enabled", android.widget.Toast.LENGTH_SHORT).show()
+                android.widget.Toast.makeText(this, "Media sync is not enabled", android.widget.Toast.LENGTH_SHORT).show()
             }
             return
         }

@@ -6,12 +6,12 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import net.wastu.clipboard.R
 import net.wastu.clipboard.service.ClipboardContentForwarder
+import net.wastu.clipboard.service.MediaBundle
 import net.wastu.clipboard.service.ClipboardService
 import java.io.File
 
@@ -23,11 +23,11 @@ open class ShareReceiverActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (intent?.action == Intent.ACTION_SEND) {
-            when {
-                intent.type?.startsWith("text/") == true -> handleTextShare()
-                intent.type != null -> handleMediaShare()
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                if (intent.type?.startsWith("text/") == true) handleTextShare() else handleMediaShare()
             }
+            Intent.ACTION_SEND_MULTIPLE -> handleMediaShare()
         }
 
         finish()
@@ -75,43 +75,48 @@ open class ShareReceiverActivity : AppCompatActivity() {
     }
 
     private fun handleMediaShare() {
-        val imageUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        val uris = buildList {
+            intent.clipData?.let { clip ->
+                for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let(::add)
+            }
+            if (isEmpty()) {
+                val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                uri?.let(::add)
+            }
         }
 
-        if (imageUri == null) {
+        if (uris.isEmpty()) {
             Toast.makeText(this, "No media to send", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Check size via OpenableColumns
         val maxSize = ClipboardContentForwarder.MAX_MEDIA_BYTES
-        val size = getUriSize(imageUri)
-        if (size != null && size > maxSize) {
+        val items = uris.mapNotNull { uri ->
+            val mimeType = contentResolver.getType(uri) ?: intent.type ?: "application/octet-stream"
+            runCatching {
+                contentResolver.openInputStream(uri)?.use { MediaBundle.Item(mimeType, it.readBytes()) }
+            }.getOrNull()
+        }
+        val mediaData = if (items.size == 1) items[0].data else runCatching { MediaBundle.encode(items) }.getOrNull()
+        if (mediaData == null || mediaData.isEmpty() || mediaData.size > maxSize) {
             Toast.makeText(this, "Media too large to send (max 20 MB)", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Copy to cache file
-        val mimeType = intent.type ?: contentResolver.getType(imageUri) ?: "application/octet-stream"
+        val mimeType = if (items.size == 1) items[0].mimeType else MediaBundle.MIME_TYPE
         val extension = mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
         val cacheDir = File(cacheDir, "shared_images")
         cacheDir.mkdirs()
-        val cacheFile = File(cacheDir, "share_image_${System.currentTimeMillis()}.$extension")
+        val cacheFile = File(cacheDir, "share_media_${System.currentTimeMillis()}.$extension")
 
         try {
-            contentResolver.openInputStream(imageUri)?.use { input ->
-                cacheFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            } ?: run {
-                Toast.makeText(this, "Could not read image", Toast.LENGTH_SHORT).show()
-                return
-            }
+            cacheFile.writeBytes(mediaData)
         } catch (e: Exception) {
-            Toast.makeText(this, "Could not read image", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Could not read media", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -135,19 +140,6 @@ open class ShareReceiverActivity : AppCompatActivity() {
             return
         }
         showSentToast()
-    }
-
-    private fun getUriSize(uri: Uri): Long? {
-        return try {
-            contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) cursor.getLong(sizeIndex) else null
-                } else null
-            }
-        } catch (_: Exception) {
-            null
-        }
     }
 
     private fun showSentToast() {

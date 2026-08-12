@@ -39,14 +39,24 @@ class ClipboardWriter(context: Context) {
         val applyWrite = {
             val dir = File(appContext.cacheDir, "shared_images")
             dir.mkdirs()
-            val extension = contentType.substringAfterLast('/').take(8).ifBlank { "bin" }
-            val file = File(dir, "clipboard_media.$extension")
-            file.writeBytes(mediaData)
-            val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+            val items = MediaBundle.decode(mediaData)
+                ?: listOf(MediaBundle.Item(contentType, mediaData))
+            val first = items.first()
+            val firstExtension = first.mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
+            val firstFile = File(dir, "clipboard_media_0.$firstExtension")
+            firstFile.writeBytes(first.data)
+            val firstUri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", firstFile)
             val clip = ClipData(
-                ClipDescription(CLIP_LABEL, arrayOf(contentType)),
-                ClipData.Item(uri)
+                ClipDescription(CLIP_LABEL, arrayOf(first.mimeType)),
+                ClipData.Item(firstUri)
             )
+            items.drop(1).forEachIndexed { index, item ->
+                val extension = item.mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
+                val file = File(dir, "clipboard_media_${index + 1}.$extension")
+                file.writeBytes(item.data)
+                val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+                clip.addItem(ClipData.Item(uri))
+            }
             runCatching { clipboard.setPrimaryClip(clip) }
                 .onFailure { error ->
                     android.util.Log.w("ClipboardWriter", "Could not write media to clipboard", error)

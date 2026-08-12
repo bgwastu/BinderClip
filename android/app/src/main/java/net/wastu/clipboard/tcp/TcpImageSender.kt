@@ -15,6 +15,7 @@ object TcpImageSender {
         data: ByteArray,
         nonce: ByteArray? = null,
         connectTimeoutMs: Int = 3000,
+        onProgress: ((Long, Long) -> Unit)? = null,
     ) {
         val socket = Socket()
         try {
@@ -23,7 +24,13 @@ object TcpImageSender {
             if (nonce != null) {
                 out.write(nonce)
             }
-            out.write(data)
+            var offset = 0
+            while (offset < data.size) {
+                val count = minOf(64 * 1024, data.size - offset)
+                out.write(data, offset, count)
+                offset += count
+                onProgress?.invoke(offset.toLong(), data.size.toLong())
+            }
             out.flush()
         } catch (e: Exception) {
             throw TcpTransferException("Failed to send: ${e.message}", e)

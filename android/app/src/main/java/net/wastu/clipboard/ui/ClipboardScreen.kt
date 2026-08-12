@@ -44,6 +44,7 @@ fun ClipboardScreen(
     autoCopyEnabled: Boolean,
     autoCopyAccessibilityEnabled: Boolean,
     imageSyncEnabled: Boolean,
+    mediaOverlayEnabled: Boolean,
     pairingFailed: Boolean,
     onPairingCancelClick: () -> Unit,
     onPairingErrorDismiss: () -> Unit,
@@ -53,6 +54,7 @@ fun ClipboardScreen(
     onHideClipboardSettingChanged: (Boolean) -> Unit,
     onAutoCopySettingChanged: (Boolean) -> Unit,
     onImageSyncSettingChanged: (Boolean) -> Unit,
+    onMediaOverlaySettingChanged: (Boolean) -> Unit,
     onAutoCopyFixClick: () -> Unit,
 ) {
     val macs = (state as? AppState.Paired)?.macs.orEmpty()
@@ -137,10 +139,19 @@ fun ClipboardScreen(
                 item { HorizontalDivider() }
                 item {
                     PreferenceSwitch(
-                        title = stringResource(R.string.image_sync_setting_title),
-                        summary = stringResource(R.string.image_sync_setting_subtitle),
+                        title = stringResource(R.string.media_sync_setting_title),
+                        summary = stringResource(R.string.media_sync_setting_subtitle),
                         checked = imageSyncEnabled,
                         onCheckedChange = onImageSyncSettingChanged
+                    )
+                }
+                item { HorizontalDivider() }
+                item {
+                    PreferenceSwitch(
+                        title = "Media transfer overlay",
+                        summary = "Show live transfer progress over other apps. Enable BinderClip display-over-other-apps permission first.",
+                        checked = mediaOverlayEnabled,
+                        onCheckedChange = onMediaOverlaySettingChanged
                     )
                 }
                 item { HorizontalDivider() }

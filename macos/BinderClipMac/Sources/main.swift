@@ -3,6 +3,10 @@
 import AppKit
 import os
 
+if CustomUpdater.runHelperIfRequested(arguments: CommandLine.arguments) {
+    exit(0)
+}
+
 // Ignore SIGPIPE globally so broken TCP sockets return EPIPE errors
 // instead of killing the process. Without this, a peer resetting a
 // connection during image transfer crashes the app.

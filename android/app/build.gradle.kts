@@ -33,7 +33,7 @@ val releaseSigningValues = listOf(
 val releaseSigningConfigured = releaseSigningValues.all { it != null }
 val releaseSigningPartiallyConfigured = releaseSigningValues.any { it != null } && !releaseSigningConfigured
 
-if (releaseSigningPartiallyConfigured) {
+if (releaseSigningPartiallyConfigured && gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
     throw GradleException(
         "Incomplete Android release signing configuration. " +
         "Provide all values in android/keystore.properties (storeFile, storePassword, keyAlias) " +

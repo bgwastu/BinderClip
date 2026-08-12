@@ -1,8 +1,7 @@
 #!/bin/zsh
 
 # Build a production BinderClip.app and its distributable DMG.
-# This intentionally does not notarize: the resulting app is ad-hoc signed and
-# users must allow it in Gatekeeper, as documented in macos/README.md.
+# This intentionally does not notarize: the resulting app is ad-hoc signed.
 
 set -euo pipefail
 
@@ -18,8 +17,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-$PWD/dist}"
 DMG_PATH="$OUTPUT_DIR/BinderClip-$VERSION.dmg"
 BUILD_ROOT="$PACKAGE_DIR/.build/release-package"
 
-if [[ "$VERSION" == *"/"* || "$VERSION" == *" "* ]]; then
+if [[ ! "$VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' ]]; then
   print -u2 "VERSION must be a release version such as 1.0.0"
+  exit 2
+fi
+if [[ ! "$BUILD_NUMBER" =~ '^[1-9][0-9]*$' ]]; then
+  print -u2 "BUILD_NUMBER must be a positive integer"
   exit 2
 fi
 
@@ -28,8 +31,6 @@ SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-}"
   print -u2 "SPARKLE_PUBLIC_ED_KEY is required for a production build"
   exit 2
 }
-FEED_URL="${SPARKLE_FEED_URL:-https://github.com/${GITHUB_REPOSITORY:-bgwastu/BinderClip}/releases/latest/download/appcast.xml}"
-
 print "Building BinderClip $VERSION..."
 rm -rf "$BUILD_ROOT"
 swift build --package-path "$PACKAGE_DIR" --configuration release \
@@ -75,15 +76,12 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key><string>BinderClip uses Bluetooth to sync clipboard data with your devices.</string>
   <key>NSLocalNetworkUsageDescription</key><string>BinderClip uses your local network to transfer clipboard images.</string>
-  <key>SUFeedURL</key><string>$FEED_URL</string>
   <key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_ED_KEY</string>
-  <key>SUEnableAutomaticChecks</key><true/>
 </dict></plist>
 PLIST
 
 install_name_tool -add_rpath '@loader_path/../Frameworks' "$APP_PATH/Contents/MacOS/BinderClip"
-# Ad-hoc signing is enough for Sparkle's update verification, but is not a
-# replacement for Developer ID signing or notarization.
+# The update archive is authenticated separately with the Ed25519 key above.
 codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
 [[ "$(lipo -archs "$APP_PATH/Contents/MacOS/BinderClip")" == *"arm64"* ]] || exit 1

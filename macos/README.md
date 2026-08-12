@@ -27,8 +27,9 @@ To build without launching:
 
 Production releases are built by `.github/workflows/macos-release.yml` when a
 GitHub Release is published. The workflow creates `BinderClip-<version>.dmg`,
-an update ZIP, and a Sparkle `appcast.xml`; Sparkle checks the appcast and can
-download and install newer releases automatically.
+an update ZIP, and a Sparkle `appcast.xml`. BinderClip uses the appcast as a
+signed update manifest and its own transactional installer to download,
+verify, replace, and relaunch the app.
 
 Before publishing the first release, create one Sparkle Ed25519 key pair with
 Sparkle's `generate_keys`. CI installs the pinned BWS CLI and loads both values
@@ -46,11 +47,12 @@ Obtainium, add `https://github.com/bgwastu/BinderClip`; it will find the APK
 attached to each release and use its increasing Android version code.
 
 This workflow intentionally does not notarize or Developer ID sign the app.
-It ad-hoc signs the app and Sparkle signs update archives, so Gatekeeper may
-block a fresh download. Users must use the existing Gatekeeper exception or
-right-click the app and choose Open once. Sparkle updates can then be applied
-without reinstalling manually. This is less safe and less convenient than
-Developer ID signing plus notarization.
+It ad-hoc signs the app and authenticates update archives with the Sparkle
+Ed25519 key. A fresh download may require the existing Gatekeeper exception or
+one right-click Open action. After launch, updates are verified fail-closed,
+installed by a separate helper with rollback, and relaunched automatically.
+This preserves archive authenticity without requiring a paid Developer ID
+certificate, but does not provide Apple identity or notarization guarantees.
 
 The release build is universal for Apple silicon and Intel Macs. Release tags
 must be normal semantic versions, for example `v1.0.0`.

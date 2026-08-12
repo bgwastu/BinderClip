@@ -6,7 +6,6 @@ import CoreBluetooth
 import CryptoKit
 import os
 import ServiceManagement
-import Sparkle
 
 private let appLogger = Logger(subsystem: "net.wastu.clipboard", category: "App")
 
@@ -17,11 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let notificationManager = ReceiveNotificationManager()
     private let pairingWindowController = PairingWindowController()
     private let mediaOverlayController = MediaTransferOverlayController()
-    private lazy var updaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    private let updater = CustomUpdater()
 
     override init() {
         statusBarController = StatusBarController()
@@ -48,8 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pairingManager.removePendingDevices()
         enableLaunchAtLoginIfFirstRun()
         installSleepWakeObservers()
-        _ = updaterController
-        updaterController.updater.checkForUpdatesInBackground()
+        updater.checkAndInstall(interactive: false)
 
         statusBarController.onPairNewDeviceRequested = { [weak self] in
             self?.startPairing()
@@ -76,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.connectionController?.toggleImageSync()
         }
         statusBarController.onCheckForUpdates = { [weak self] in
-            self?.updaterController.checkForUpdates(nil)
+            self?.updater.checkAndInstall(interactive: true)
         }
         statusBarController.isMediaOverlayEnabled = { [weak self] in
             self?.mediaOverlayController.isEnabled ?? false

@@ -10,7 +10,9 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "BinderClip",
-            path: "Sources"
+            path: ".",
+            exclude: ["Tests"],
+            resources: [.copy("Resources")]
         ),
         .testTarget(
             name: "BinderClipTests",

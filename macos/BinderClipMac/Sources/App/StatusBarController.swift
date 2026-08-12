@@ -30,7 +30,7 @@ final class StatusBarController {
     private var syncPulseTimer: Timer?
 
     init() {
-        binderStatusBarImage = loadStatusBarIcon(named: "StatusBarBinderFilled")
+        binderStatusBarImage = loadStatusBarIcon(named: "BinderClipMenuIcon")
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.imageScaling = .scaleProportionallyDown
         updateStatusBarIcon()
@@ -38,21 +38,20 @@ final class StatusBarController {
     }
 
     private func loadStatusBarIcon(named name: String) -> NSImage? {
-        let image = NSImage(size: NSSize(width: 18, height: 18))
-        for resourceName in [name, "\(name)@2x"] {
-            guard let path = Bundle.main.path(forResource: resourceName, ofType: "png"),
-                  let source = NSImage(contentsOfFile: path) else {
-                continue
-            }
-            source.representations.forEach(image.addRepresentation)
+        guard let resourceURL = Bundle.main.url(forResource: name, withExtension: "svg"),
+              let image = NSImage(contentsOf: resourceURL) else {
+            return nil
         }
-        return image.representations.isEmpty ? nil : image
+        image.size = NSSize(width: 18, height: 18)
+        return image
     }
 
     private func updateStatusBarIcon() {
-        guard let button = statusItem.button,
-              let binder = binderStatusBarImage else {
-            statusItem.button?.title = "BC"
+        guard let button = statusItem.button else { return }
+        guard let binder = binderStatusBarImage else {
+            // Do not substitute text for the branded menu bar icon if loading fails.
+            button.title = ""
+            button.image = nil
             return
         }
         if bluetoothWarning != nil {

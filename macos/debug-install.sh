@@ -41,10 +41,7 @@ mkdir -p "$STAGING_PATH/Contents/MacOS" "$STAGING_PATH/Contents/Resources"
 cp "$EXECUTABLE" "$STAGING_PATH/Contents/MacOS/BinderClip"
 chmod 755 "$STAGING_PATH/Contents/MacOS/BinderClip"
 cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$STAGING_PATH/Contents/Resources/AppIcon.icns"
-cp "$PACKAGE_DIR/Resources/StatusBarBinderFilled.png" "$STAGING_PATH/Contents/Resources/StatusBarBinderFilled.png"
-cp "$PACKAGE_DIR/Resources/StatusBarBinderOutline.png" "$STAGING_PATH/Contents/Resources/StatusBarBinderOutline.png"
-cp "$PACKAGE_DIR/Resources/StatusBarIcon.png" "$STAGING_PATH/Contents/Resources/StatusBarIcon.png"
-cp "$PACKAGE_DIR/Resources/StatusBarIcon@2x.png" "$STAGING_PATH/Contents/Resources/StatusBarIcon@2x.png"
+cp "$PACKAGE_DIR/Resources/BinderClipMenuIcon.svg" "$STAGING_PATH/Contents/Resources/BinderClipMenuIcon.svg"
 
 cat > "$STAGING_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

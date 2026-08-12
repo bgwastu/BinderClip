@@ -49,8 +49,8 @@ android {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
-        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "0.1.0-dev"
+        versionCode = (System.getenv("VERSION_CODE") ?: "6").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "0.0.2"
 
         val gitHash = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")

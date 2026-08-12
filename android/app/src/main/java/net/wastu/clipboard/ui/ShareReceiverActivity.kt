@@ -1,6 +1,6 @@
 package net.wastu.clipboard.ui
 
-// Handles Android share-sheet intents to send shared text or images to the connected Mac.
+// Handles Android share-sheet intents to send shared text or media to the connected Mac.
 
 import android.content.Intent
 import android.net.Uri
@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import net.wastu.clipboard.R
+import net.wastu.clipboard.service.ClipboardContentForwarder
 import net.wastu.clipboard.service.ClipboardService
 import java.io.File
 
@@ -24,8 +25,8 @@ open class ShareReceiverActivity : AppCompatActivity() {
 
         if (intent?.action == Intent.ACTION_SEND) {
             when {
-                intent.type?.startsWith("image/") == true -> handleImageShare()
                 intent.type?.startsWith("text/") == true -> handleTextShare()
+                intent.type != null -> handleMediaShare()
             }
         }
 
@@ -35,11 +36,7 @@ open class ShareReceiverActivity : AppCompatActivity() {
     private fun handleTextShare() {
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         if (!text.isNullOrBlank()) {
-            if (intent.getBooleanExtra(EXTRA_OPEN_ON_DEVICE, false)) {
-                if (!isWebUrl(text)) {
-                    Toast.makeText(this, "Only web links can be opened on the Mac", Toast.LENGTH_SHORT).show()
-                    return
-                }
+            if (isWebUrl(text)) {
                 val serviceIntent = Intent(this, ClipboardService::class.java).apply {
                     action = ClipboardService.ACTION_OPEN_URL
                     putExtra(ClipboardService.EXTRA_URL, text)
@@ -77,7 +74,7 @@ open class ShareReceiverActivity : AppCompatActivity() {
         Toast.makeText(this, "Opening in $deviceName", Toast.LENGTH_SHORT).show()
     }
 
-    private fun handleImageShare() {
+    private fun handleMediaShare() {
         val imageUri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
         } else {
@@ -85,24 +82,21 @@ open class ShareReceiverActivity : AppCompatActivity() {
         }
 
         if (imageUri == null) {
-            Toast.makeText(this, "No image to send", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No media to send", Toast.LENGTH_SHORT).show()
             return
         }
 
         // Check size via OpenableColumns
-        val maxSize = 10_485_760L // 10 MB
+        val maxSize = ClipboardContentForwarder.MAX_MEDIA_BYTES
         val size = getUriSize(imageUri)
         if (size != null && size > maxSize) {
-            Toast.makeText(this, "Image too large to send (max 10 MB)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Media too large to send (max 20 MB)", Toast.LENGTH_SHORT).show()
             return
         }
 
         // Copy to cache file
-        val mimeType = intent.type ?: contentResolver.getType(imageUri) ?: "image/png"
-        val extension = when {
-            mimeType.contains("jpeg") || mimeType.contains("jpg") -> "jpg"
-            else -> "png"
-        }
+        val mimeType = intent.type ?: contentResolver.getType(imageUri) ?: "application/octet-stream"
+        val extension = mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
         val cacheDir = File(cacheDir, "shared_images")
         cacheDir.mkdirs()
         val cacheFile = File(cacheDir, "share_image_${System.currentTimeMillis()}.$extension")
@@ -124,7 +118,7 @@ open class ShareReceiverActivity : AppCompatActivity() {
         // Double-check actual file size after copy
         if (cacheFile.length() > maxSize) {
             cacheFile.delete()
-            Toast.makeText(this, "Image too large to send (max 10 MB)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Media too large to send (max 20 MB)", Toast.LENGTH_SHORT).show()
             return
         }
 

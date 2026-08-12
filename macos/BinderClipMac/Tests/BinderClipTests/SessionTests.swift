@@ -1001,10 +1001,10 @@ final class SessionTests: XCTestCase {
 
         wait(for: [readyExpectation], timeout: 3.0)
 
-        // Send image OFFER with size > 10MB
+        // Send media OFFER with size > 20MB
         let offerJSON: [String: Any] = [
             "hash": "abc123",
-            "size": 11 * 1024 * 1024,
+            "size": 21 * 1024 * 1024,
             "type": "image/png",
             "senderIp": "192.168.1.10"
         ]
@@ -1140,7 +1140,7 @@ final class SessionTests: XCTestCase {
     // MARK: - Edge case tests
 
     func testReceiverRejectsOversizedImageWithSizeExceeded() {
-        // OFFER with size = 11_000_000 (over 10MB limit)
+        // OFFER with size = 21_000_000 (over 20MB limit)
         let env = createManualStreams()
         let sp = TestSettingsProvider(richMediaEnabled: true, richMediaEnabledChangedAt: 1000)
         let readyExpectation = expectation(description: "Session ready")
@@ -1164,10 +1164,10 @@ final class SessionTests: XCTestCase {
 
         wait(for: [readyExpectation], timeout: 3.0)
 
-        // Send image OFFER with size = 11_000_000 (> 10 * 1024 * 1024)
+        // Send media OFFER with size = 21_000_000 (> 20 * 1024 * 1024)
         let offerJSON: [String: Any] = [
             "hash": "abc123",
-            "size": 11_000_000,
+            "size": 21_000_000,
             "type": "image/png",
             "senderIp": "192.168.1.10"
         ]

@@ -1,6 +1,6 @@
 package net.wastu.clipboard.service
 
-// Writes received text or images to the Android system clipboard on the main thread.
+// Writes received text or media to the Android system clipboard on the main thread.
 
 import android.content.ClipData
 import android.content.ClipDescription
@@ -30,28 +30,27 @@ class ClipboardWriter(context: Context) {
                 }
             }
             runCatching { clipboard.setPrimaryClip(clip) }
-                .onFailure { error ->
-                    android.util.Log.w("ClipboardWriter", "Could not write image to clipboard", error)
-                }
             Unit
         }
         if (Looper.myLooper() == Looper.getMainLooper()) applyWrite() else mainHandler.post(applyWrite)
     }
 
-    fun writeImage(imageData: ByteArray, contentType: String) {
+    fun writeMedia(mediaData: ByteArray, contentType: String) {
         val applyWrite = {
             val dir = File(appContext.cacheDir, "shared_images")
             dir.mkdirs()
-            val extension = when (contentType) {
-                "image/jpeg" -> "jpg"
-                else -> "png"
-            }
-            val file = File(dir, "clipboard_image.$extension")
-            file.writeBytes(imageData)
+            val extension = contentType.substringAfterLast('/').take(8).ifBlank { "bin" }
+            val file = File(dir, "clipboard_media.$extension")
+            file.writeBytes(mediaData)
             val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
-            val mimeType = if (contentType == "image/jpeg") "image/jpeg" else "image/png"
-            val clip = ClipData.newUri(appContext.contentResolver, CLIP_LABEL, uri)
+            val clip = ClipData(
+                ClipDescription(CLIP_LABEL, arrayOf(contentType)),
+                ClipData.Item(uri)
+            )
             runCatching { clipboard.setPrimaryClip(clip) }
+                .onFailure { error ->
+                    android.util.Log.w("ClipboardWriter", "Could not write media to clipboard", error)
+                }
             Unit
         }
         if (Looper.myLooper() == Looper.getMainLooper()) applyWrite() else mainHandler.post(applyWrite)

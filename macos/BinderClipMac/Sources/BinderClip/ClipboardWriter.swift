@@ -11,12 +11,14 @@ final class ClipboardWriter {
     }
 
     @discardableResult
-    func writeImage(_ data: Data, contentType: String) -> Bool {
+    func writeMedia(_ data: Data, contentType: String) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        let pasteboardType: NSPasteboard.PasteboardType = contentType.contains("jpeg")
-            ? NSPasteboard.PasteboardType("public.jpeg")
-            : .png
+        let pasteboardType = NSPasteboard.PasteboardType(contentType)
         return pasteboard.setData(data, forType: pasteboardType)
+    }
+
+    func writeImage(_ data: Data, contentType: String) -> Bool {
+        writeMedia(data, contentType: contentType.contains("jpeg") ? "public.jpeg" : "public.png")
     }
 }

@@ -48,6 +48,7 @@ class ClipboardService : Service(), L2capServerCallback {
     companion object {
         const val ACTION_PUSH_TEXT = "net.wastu.clipboard.action.PUSH_TEXT"
         const val ACTION_OPEN_URL = "net.wastu.clipboard.action.OPEN_URL"
+        const val ACTION_COPY_TO_CLIPBOARD = "net.wastu.clipboard.action.COPY_TO_CLIPBOARD"
         const val ACTION_RELOAD_PAIRING = "net.wastu.clipboard.action.RELOAD_PAIRING"
         const val ACTION_UNPAIR = "net.wastu.clipboard.action.UNPAIR"
         const val ACTION_FORGET_DEVICE = "net.wastu.clipboard.action.FORGET_DEVICE"
@@ -335,7 +336,7 @@ class ClipboardService : Service(), L2capServerCallback {
             }
             ACTION_PUSH_IMAGE -> {
                 val imagePath = intent.getStringExtra(EXTRA_IMAGE_PATH)
-                val mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "image/png"
+                val mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: "application/octet-stream"
                 if (imagePath != null) {
                     executor.execute {
                         pushImageToMac(imagePath, mimeType)
@@ -356,6 +357,7 @@ class ClipboardService : Service(), L2capServerCallback {
                     executor.execute { openUrlOnMac(url) }
                 }
             }
+            ACTION_COPY_TO_CLIPBOARD -> return START_STICKY
             ACTION_QUERY_CONNECTION -> {
                 broadcastConnectionState()
             }
@@ -716,7 +718,7 @@ class ClipboardService : Service(), L2capServerCallback {
     private fun handleImageReceived(data: ByteArray, contentType: String, hash: String) {
         lastReceivedImageHash = hash
         Log.w(TAG, "Received image from Mac (${data.size} bytes, $contentType)")
-        clipboardWriter.writeImage(data, contentType)
+        clipboardWriter.writeMedia(data, contentType)
         sendClipboardTransferBroadcast(fromMac = true)
     }
 
@@ -774,11 +776,11 @@ class ClipboardService : Service(), L2capServerCallback {
         val imageData = file.readBytes()
         file.delete() // clean up cache file after reading
 
-        val maxSize = 10_485_760 // 10 MB
+        val maxSize = ClipboardContentForwarder.MAX_MEDIA_BYTES
         if (imageData.isEmpty() || imageData.size > maxSize) {
             Log.w(TAG, "Image too large or empty: ${imageData.size} bytes")
             Handler(Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(this, "Image too large to send (max 10 MB)", android.widget.Toast.LENGTH_SHORT).show()
+                android.widget.Toast.makeText(this, "Media too large to send (max 20 MB)", android.widget.Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -1037,18 +1039,7 @@ class ClipboardService : Service(), L2capServerCallback {
 
     private fun publishDirectShareShortcut(deviceName: String?) {
         val label = deviceName ?: "Mac"
-        val sendShortcut = ShortcutInfoCompat.Builder(this, "send_to_mac")
-            .setShortLabel("Send to $label")
-            .setIcon(IconCompat.createWithResource(this, R.drawable.ic_share_to_device))
-            .setIntent(Intent(Intent.ACTION_SEND).apply {
-                setClass(this@ClipboardService, net.wastu.clipboard.ui.ShareReceiverActivity::class.java)
-                type = "*/*"
-                putExtra(Intent.EXTRA_TEXT, "")
-            })
-            .setCategories(setOf("net.wastu.clipboard.category.SEND_TO_MAC"))
-            .setLongLived(true)
-            .build()
-
+        ShortcutManagerCompat.removeDynamicShortcuts(this, listOf("send_to_mac"))
         val openShortcut = ShortcutInfoCompat.Builder(this, "open_on_device")
             .setShortLabel("Open in $label")
             .setIcon(IconCompat.createWithResource(this, R.drawable.ic_open_in_device))
@@ -1060,12 +1051,23 @@ class ClipboardService : Service(), L2capServerCallback {
             .setLongLived(true)
             .build()
 
-        ShortcutManagerCompat.addDynamicShortcuts(this, listOf(sendShortcut, openShortcut))
+        val copyShortcut = ShortcutInfoCompat.Builder(this, "copy_to_clipboard")
+            .setShortLabel("Copy to clipboard")
+            .setIcon(IconCompat.createWithResource(this, R.drawable.ic_binder_clip))
+            .setIntent(Intent(Intent.ACTION_SEND).apply {
+                setClass(this@ClipboardService, net.wastu.clipboard.ui.CopyToClipboardShareReceiverActivity::class.java)
+                type = "*/*"
+            })
+            .setCategories(setOf("net.wastu.clipboard.category.COPY_TO_CLIPBOARD"))
+            .setLongLived(true)
+            .build()
+
+        ShortcutManagerCompat.addDynamicShortcuts(this, listOf(openShortcut, copyShortcut))
         Log.d(TAG, "Published direct share shortcuts for $label")
     }
 
     private fun removeDirectShareShortcut() {
-        ShortcutManagerCompat.removeDynamicShortcuts(this, listOf("send_to_mac", "open_on_device"))
+        ShortcutManagerCompat.removeDynamicShortcuts(this, listOf("send_to_mac", "open_on_device", "copy_to_clipboard"))
         Log.d(TAG, "Removed direct share shortcut")
     }
 

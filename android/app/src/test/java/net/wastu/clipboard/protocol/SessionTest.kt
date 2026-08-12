@@ -1410,10 +1410,10 @@ class SessionTest {
         sendValidWelcome(toMac, hello)
         assertTrue("Session should be ready", readyLatch.await(3, TimeUnit.SECONDS))
 
-        // Send image OFFER with size > 10MB
+        // Send media OFFER with size > 20MB
         val offerJson = JSONObject().apply {
             put("hash", "abc123")
-            put("size", 11 * 1024 * 1024)
+            put("size", 21 * 1024 * 1024)
             put("type", "image/png")
             put("senderIp", "192.168.1.10")
         }
@@ -1539,8 +1539,8 @@ class SessionTest {
     // ── Edge case tests ─────────────────────────────────────────────
 
     @Test
-    fun `receiver rejects oversized image with size_exceeded`() {
-        // OFFER with size = 11_000_000 (over the 10MB limit)
+    fun `receiver rejects oversized media with size_exceeded`() {
+        // OFFER with size = 21_000_000 (over the 20MB limit)
         val macInput = PipedInputStream()
         val toMac = PipedOutputStream(macInput)
         val macOutput = PipedOutputStream()
@@ -1570,10 +1570,10 @@ class SessionTest {
         sendValidWelcome(toMac, hello)
         assertTrue("Session should be ready", readyLatch.await(3, TimeUnit.SECONDS))
 
-        // Send image OFFER with size = 11_000_000 (> 10 * 1024 * 1024)
+        // Send media OFFER with size = 21_000_000 (> 20 * 1024 * 1024)
         val offerJson = JSONObject().apply {
             put("hash", "abc123")
-            put("size", 11_000_000)
+            put("size", 21_000_000)
             put("type", "image/png")
             put("senderIp", "192.168.1.10")
         }

@@ -347,7 +347,7 @@ class Session(
             MessageType.OFFER -> {
                 val json = JSONObject(String(msg.payload))
                 val type = json.optString("type", "text/plain")
-                if (type.startsWith("image/")) {
+                if (type != "text/plain" && type != "text/*") {
                     handleInboundImageOffer(msg)
                 } else {
                     handleInboundOffer(msg)
@@ -558,7 +558,7 @@ class Session(
         }
 
         // Check size <= 10MB
-        val maxSize = 10 * 1024 * 1024
+        val maxSize = 20 * 1024 * 1024
         if (size > maxSize) {
             val rejectJson = JSONObject().apply {
                 put("reason", "size_exceeded")

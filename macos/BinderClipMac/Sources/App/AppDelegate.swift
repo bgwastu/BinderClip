@@ -317,7 +317,7 @@ extension AppDelegate: ConnectionControllerDelegate {
     }
 
     func didReceiveImage(data: Data, contentType: String) {
-        if !clipboardWriter.writeImage(data, contentType: contentType) {
+        if !clipboardWriter.writeMedia(data, contentType: contentType) {
             appLogger.error("[App] Failed to write received image to the pasteboard")
         }
         statusBarController.flashSyncIndicator()

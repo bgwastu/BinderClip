@@ -356,7 +356,7 @@ final class Session {
         switch msg.type {
         case .offer:
             if let json = try? JSONSerialization.jsonObject(with: msg.payload) as? [String: Any],
-               let type = json["type"] as? String, type.hasPrefix("image/") {
+               let type = json["type"] as? String, type != "text/plain", type != "text/*" {
                 try handleInboundImageOffer(msg)
             } else {
                 try handleInboundOffer(msg)
@@ -661,7 +661,7 @@ final class Session {
         }
 
         // Check size <= 10MB
-        let maxSize = 10 * 1024 * 1024
+        let maxSize = 20 * 1024 * 1024
         if size > maxSize {
             let rejectJSON: [String: Any] = ["reason": "size_exceeded"]
             let rejectData = try JSONSerialization.data(withJSONObject: rejectJSON)

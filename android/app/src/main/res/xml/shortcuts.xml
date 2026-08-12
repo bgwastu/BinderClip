@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
-    <share-target android:targetClass="net.wastu.clipboard.ui.ShareReceiverActivity">
-        <data android:mimeType="text/plain" />
-        <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
-    </share-target>
     <share-target android:targetClass="net.wastu.clipboard.ui.OpenUrlShareReceiverActivity">
         <data android:mimeType="text/plain" />
         <category android:name="net.wastu.clipboard.category.SEND_TO_MAC" />
+    </share-target>
+    <share-target android:targetClass="net.wastu.clipboard.ui.CopyToClipboardShareReceiverActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="net.wastu.clipboard.category.COPY_TO_CLIPBOARD" />
     </share-target>
 </shortcuts>

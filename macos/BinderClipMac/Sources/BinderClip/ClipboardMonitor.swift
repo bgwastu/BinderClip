@@ -73,8 +73,8 @@ final class ClipboardMonitor {
             return
         }
 
-        // Images take priority over text
-        if let (imageData, contentType) = pasteboardImage(pasteboard) {
+        // Media takes priority over text.
+        if let (imageData, contentType) = pasteboardMedia(pasteboard) {
             let digest = SHA256.hash(data: imageData)
             let hash = digest.map { String(format: "%02x", $0) }.joined()
             guard hash != lastHash else { return }
@@ -94,8 +94,8 @@ final class ClipboardMonitor {
     }
 
     /// Returns (imageData, contentType) or nil. TIFF is converted to PNG per spec.
-    private func pasteboardImage(_ pasteboard: NSPasteboard) -> (Data, String)? {
-        let maxSize = 10_485_760 // 10 MB
+    private func pasteboardMedia(_ pasteboard: NSPasteboard) -> (Data, String)? {
+        let maxSize = 20_971_520 // 20 MB
         if let png = pasteboard.data(forType: .png), png.count <= maxSize {
             return (png, "image/png")
         }
@@ -108,6 +108,17 @@ final class ClipboardMonitor {
            let png = bitmapRep.representation(using: .png, properties: [:]),
            png.count <= maxSize {
             return (png, "image/png")
+        }
+        let mediaTypes: [(NSPasteboard.PasteboardType, String)] = [
+            (NSPasteboard.PasteboardType("public.movie"), "video/quicktime"),
+            (NSPasteboard.PasteboardType("public.mpeg-4"), "video/mp4"),
+            (NSPasteboard.PasteboardType("public.audio"), "audio/mpeg"),
+            (NSPasteboard.PasteboardType("com.adobe.pdf"), "application/pdf")
+        ]
+        for (pasteboardType, contentType) in mediaTypes {
+            if let data = pasteboard.data(forType: pasteboardType), data.count <= maxSize {
+                return (data, contentType)
+            }
         }
         return nil
     }

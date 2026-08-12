@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.BinderClip" parent="Theme.Material3.Light.NoActionBar">
+    <style name="Theme.BinderClip" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>
         <item name="android:statusBarColor">@color/window_background</item>
         <item name="android:navigationBarColor">@color/window_background</item>

@@ -11,25 +11,25 @@ import java.io.File
 
 /** Dispatches the current clipboard item through the same service paths as ShareReceiverActivity. */
 internal object ClipboardContentForwarder {
-    private const val MAX_IMAGE_BYTES = 10_485_760L
+    const val MAX_MEDIA_BYTES = 20_971_520L
 
     fun forward(context: Context, clip: ClipData, description: ClipDescription?, tag: String): Boolean {
         val item = clip.getItemAt(0)
-        val imageMimeType = description
-            ?.takeIf { it.hasMimeType("image/*") }
+        val mediaMimeType = description
+            ?.takeIf { it.mimeTypeCount > 0 }
             ?.let { clipDescription ->
                 (0 until clipDescription.mimeTypeCount)
                     .map { clipDescription.getMimeType(it) }
-                    .firstOrNull { it.startsWith("image/") }
+                    .firstOrNull { it != "text/plain" && it != "text/*" }
             }
 
-        if (imageMimeType != null) {
+        if (mediaMimeType != null) {
             val uri = item.uri
             if (uri == null) {
                 Log.w(tag, "Clipboard image has no readable URI")
                 return true
             }
-            return forwardImage(context, uri, imageMimeType, tag)
+            return forwardMedia(context, uri, mediaMimeType, tag)
         }
 
         val text = item.coerceToText(context)?.toString()
@@ -47,9 +47,9 @@ internal object ClipboardContentForwarder {
         return true
     }
 
-    private fun forwardImage(context: Context, uri: Uri, mimeType: String, tag: String): Boolean {
+    private fun forwardMedia(context: Context, uri: Uri, mimeType: String, tag: String): Boolean {
         val cacheDir = File(context.cacheDir, "shared_images").apply { mkdirs() }
-        val extension = if (mimeType.contains("jpeg") || mimeType.contains("jpg")) "jpg" else "png"
+        val extension = mimeType.substringAfterLast('/').take(8).ifBlank { "bin" }
         val cacheFile = File(cacheDir, "clipboard_image_${System.currentTimeMillis()}.$extension")
 
         return try {
@@ -60,8 +60,8 @@ internal object ClipboardContentForwarder {
                 return true
             }
 
-            if (cacheFile.length() == 0L || cacheFile.length() > MAX_IMAGE_BYTES) {
-                Log.w(tag, "Clipboard image too large or empty: ${cacheFile.length()} bytes")
+            if (cacheFile.length() == 0L || cacheFile.length() > MAX_MEDIA_BYTES) {
+                Log.w(tag, "Clipboard media too large or empty: ${cacheFile.length()} bytes")
                 cacheFile.delete()
                 return true
             }

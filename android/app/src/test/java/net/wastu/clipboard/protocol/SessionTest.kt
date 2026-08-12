@@ -1430,7 +1430,7 @@ class SessionTest {
     }
 
     @Test
-    fun `handleInboundImageOffer rejects when device locked`() {
+    fun `handleInboundImageOffer accepts when device locked`() {
         val macInput = PipedInputStream()
         val toMac = PipedOutputStream(macInput)
         val macOutput = PipedOutputStream()
@@ -1470,11 +1470,10 @@ class SessionTest {
         }
         MessageCodec.write(toMac, Message(MessageType.OFFER, offerJson.toString().toByteArray()))
 
-        // Read REJECT
-        val reject = MessageCodec.decode(fromMac)
-        assertEquals(MessageType.REJECT, reject.type)
-        val rejectJson = JSONObject(String(reject.payload))
-        assertEquals("device_locked", rejectJson.getString("reason"))
+        // Image reception is allowed while locked; clipboard write behavior is
+        // handled after the encrypted transfer completes.
+        val accept = MessageCodec.decode(fromMac)
+        assertEquals(MessageType.ACCEPT, accept.type)
 
         session.close()
         macInput.close(); toMac.close(); macOutput.close(); fromMac.close()

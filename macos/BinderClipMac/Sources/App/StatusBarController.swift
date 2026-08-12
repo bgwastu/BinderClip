@@ -23,9 +23,6 @@ final class StatusBarController {
     private var bluetoothWarning: String?
     private var bluetoothWarningAction: (() -> Void)?
 
-    private lazy var connectedDot: NSImage = makeStatusDot(color: .controlAccentColor)
-    private lazy var disconnectedDot: NSImage = makeStatusDot(color: .tertiaryLabelColor)
-
     private var binderStatusBarImage: NSImage?
     private var syncPulseTimer: Timer?
 
@@ -303,7 +300,10 @@ final class StatusBarController {
                 title = peer.description
             }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.image = isConnected ? connectedDot : disconnectedDot
+            item.attributedTitle = NSAttributedString(
+                string: title,
+                attributes: [.foregroundColor: isConnected ? NSColor.labelColor : NSColor.secondaryLabelColor]
+            )
             item.isEnabled = true
 
             let submenu = NSMenu()
@@ -319,19 +319,6 @@ final class StatusBarController {
             item.submenu = submenu
             menu.addItem(item)
         }
-    }
-
-    // MARK: - Status dot
-
-    private func makeStatusDot(color: NSColor) -> NSImage {
-        let size = NSSize(width: 8, height: 8)
-        let image = NSImage(size: size, flipped: false) { rect in
-            color.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
-            return true
-        }
-        image.isTemplate = false
-        return image
     }
 
     private func dimmedTemplate(from image: NSImage) -> NSImage {

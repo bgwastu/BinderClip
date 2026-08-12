@@ -90,15 +90,7 @@ class ClipboardSendActivity : ComponentActivity() {
         }
         if (clip == null || clip.itemCount == 0) return
 
-        val text = clip.getItemAt(0).coerceToText(this)?.toString()
-        if (text.isNullOrBlank()) return
-
-        val pushIntent = Intent(this, ClipboardService::class.java).apply {
-            action = ClipboardService.ACTION_PUSH_TEXT
-            putExtra(ClipboardService.EXTRA_TEXT, text)
-        }
-        startService(pushIntent)
-        Log.d(TAG, "Forwarded clipboard text to service (${text.length} chars)")
+        ClipboardContentForwarder.forward(this, clip, clipboardManager.primaryClipDescription, TAG)
     }
 
     private fun finishSend() {

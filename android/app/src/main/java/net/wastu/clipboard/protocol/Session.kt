@@ -567,15 +567,6 @@ class Session(
             return
         }
 
-        // Check device awake state (Android only)
-        if (!callback.isDeviceAwake()) {
-            val rejectJson = JSONObject().apply {
-                put("reason", "device_locked")
-            }
-            MessageCodec.write(output, Message(MessageType.REJECT, rejectJson.toString().toByteArray()))
-            return
-        }
-
         // Cancel any in-flight transfer
         activeReceiver?.cancel()
 

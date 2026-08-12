@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
+import android.provider.Settings
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -525,7 +526,7 @@ class ClipboardService : Service(), L2capServerCallback {
             candidateSecretsHex = if (pairingInProgress) emptyList()
                 else pairingStore.loadPairedMacs().map { it.secretHex }
         )
-        session.localName = android.os.Build.MODEL
+        session.localName = localDeviceName()
         handle.session = session
         synchronized(sessionLock) { sessions.add(handle) }
 
@@ -536,6 +537,17 @@ class ClipboardService : Service(), L2capServerCallback {
             isDaemon = true
             start()
         }
+    }
+
+    private fun localDeviceName(): String {
+        val bluetoothName = runCatching {
+            (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.name
+        }.getOrNull()?.trim().orEmpty()
+        if (bluetoothName.isNotEmpty()) return bluetoothName
+
+        val systemName = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+            ?.trim().orEmpty()
+        return systemName.ifEmpty { android.os.Build.MODEL }
     }
 
     override fun onAcceptError(error: IOException) {

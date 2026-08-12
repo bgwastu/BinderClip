@@ -30,6 +30,9 @@ class ClipboardWriter(context: Context) {
                 }
             }
             runCatching { clipboard.setPrimaryClip(clip) }
+                .onFailure { error ->
+                    android.util.Log.w("ClipboardWriter", "Could not write image to clipboard", error)
+                }
             Unit
         }
         if (Looper.myLooper() == Looper.getMainLooper()) applyWrite() else mainHandler.post(applyWrite)

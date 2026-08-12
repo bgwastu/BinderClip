@@ -104,20 +104,7 @@ class ClipboardGhostActivity : ComponentActivity() {
             return false
         }
 
-        val text = clip.getItemAt(0).coerceToText(this)?.toString()
-        if (text.isNullOrBlank()) {
-            Log.d(TAG, "Clipboard text empty")
-            return false
-        }
-
-        // Forward to service via the same path as the share sheet
-        val pushIntent = Intent(this, ClipboardService::class.java).apply {
-            action = ClipboardService.ACTION_PUSH_TEXT
-            putExtra(ClipboardService.EXTRA_TEXT, text)
-        }
-        startService(pushIntent)
-        Log.d(TAG, "Forwarded clipboard text to service (${text.length} chars)")
-        return true
+        return ClipboardContentForwarder.forward(this, clip, description, TAG)
     }
 
     private fun finishGhost() {

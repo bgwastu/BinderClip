@@ -290,6 +290,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: ConnectionControllerDelegate {
     func didChangeState(connectedTokens: [String]) {
         statusBarController.setConnectedPeers(peerSummaries(for: connectedTokens))
+        // A successful handshake may have refreshed the peer's advertised name.
+        // Rebuild the trusted-device rows so the menu reflects it immediately.
+        refreshTrustedPeersMenu()
     }
 
     private func peerSummaries(for tokens: [String]) -> [PeerSummary] {

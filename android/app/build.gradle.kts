@@ -63,8 +63,7 @@ android {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1  // Auto-incremented by Play plugin's resolutionStrategy
-        versionName = file("../VERSION").readText().trim()
+        // Distribution metadata is intentionally unset until the distribution plan is defined.
 
         val gitHash = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")

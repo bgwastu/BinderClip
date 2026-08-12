@@ -48,7 +48,7 @@ final class CustomUpdater {
             return
         }
         isUpdating = true
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             do {
                 guard let self else { return }
                 guard let item = try await self.fetchUpdateItem(), self.isNewer(item) else {

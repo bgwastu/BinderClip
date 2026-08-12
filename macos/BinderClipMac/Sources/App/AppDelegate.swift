@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let clipboardWriter = ClipboardWriter()
     private let notificationManager = ReceiveNotificationManager()
     private let pairingWindowController = PairingWindowController()
+    private let mediaOverlayController = MediaTransferOverlayController()
     private lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
         updaterDelegate: nil,
@@ -75,6 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusBarController.onCheckForUpdates = { [weak self] in
             self?.updaterController.checkForUpdates(nil)
+        }
+        statusBarController.isMediaOverlayEnabled = { [weak self] in
+            self?.mediaOverlayController.isEnabled ?? false
+        }
+        statusBarController.onToggleMediaOverlay = { [weak self] in
+            self?.mediaOverlayController.isEnabled.toggle()
         }
         statusBarController.onSkipSecretsEnabled = { [weak self] in
             // Text cached for reconnect-replay while the filter was off may be a
@@ -420,5 +427,10 @@ extension AppDelegate: ConnectionControllerDelegate {
 
     func imageTransferFailed(reason: String) {
         // Logged by ConnectionController
+        mediaOverlayController.dismiss()
+    }
+
+    func mediaTransferProgress(hash: String, transferred: Int, total: Int) {
+        mediaOverlayController.update(transferred: transferred, total: total)
     }
 }

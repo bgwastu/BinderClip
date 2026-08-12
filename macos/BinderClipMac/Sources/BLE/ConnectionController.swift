@@ -119,6 +119,7 @@ protocol ConnectionControllerDelegate: AnyObject {
     func didSyncClipboard(hash: String)
     func didChangeImageSyncSetting(enabled: Bool)
     func imageTransferFailed(reason: String)
+    func mediaTransferProgress(hash: String, transferred: Int, total: Int)
 }
 
 // MARK: - ConnectionController
@@ -710,7 +711,7 @@ extension ConnectionController {
             let hash = Session.sha256Hex(data)
             guard hash != lastReceivedImageHash else { return }
             for device in devices.values where device.state.isReady {
-                guard imageSyncEnabled(for: device.token) else { continue }
+                guard mediaSyncEnabled(for: device.token) else { continue }
                 device.state.session?.sendImage(data, contentType: contentType)
             }
         }
@@ -742,7 +743,7 @@ extension ConnectionController {
 
     // MARK: Settings
 
-    /// Toggle image sync. With multiple connected devices the new value is
+    /// Toggle media sync. With multiple connected devices the new value is
     /// applied to all of them (the setting syncs last-write-wins anyway).
     func toggleImageSync() {
         queue.async { [self] in
@@ -761,17 +762,17 @@ extension ConnectionController {
             for device in devices.values where device.state.isReady {
                 device.state.session?.sendConfigUpdate()
             }
-            log("Image sync toggled to \(newEnabled) for \(targets.count) device(s)")
+            log("Media sync toggled to \(newEnabled) for \(targets.count) device(s)")
         }
     }
 
     /// Safe to call from main thread — uses cached `connectedTokens`.
     var isImageSyncEnabled: Bool {
         guard let secret = connectedToken else { return false }
-        return imageSyncEnabled(for: secret)
+        return mediaSyncEnabled(for: secret)
     }
 
-    private func imageSyncEnabled(for secret: String) -> Bool {
+    private func mediaSyncEnabled(for secret: String) -> Bool {
         return pairingManager.loadDevices()
             .first(where: { $0.sharedSecret == secret })?.richMediaEnabled ?? false
     }
@@ -1216,7 +1217,7 @@ extension ConnectionController {
     }
 
     fileprivate func handleRichMediaSettingChanged(enabled: Bool) {
-        log("Remote changed image sync to \(enabled)")
+        log("Remote changed media sync to \(enabled)")
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.didChangeImageSyncSetting(enabled: enabled)
         }
@@ -1226,6 +1227,12 @@ extension ConnectionController {
         log("Image transfer failed: \(reason)")
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.imageTransferFailed(reason: reason)
+        }
+    }
+
+    fileprivate func handleMediaTransferProgress(hash: String, transferred: Int, total: Int) {
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.mediaTransferProgress(hash: hash, transferred: transferred, total: total)
         }
     }
 }
@@ -1300,6 +1307,10 @@ class SessionAdapter: NSObject, SessionDelegate {
 
     func session(_ session: Session, imageSendFailed reason: String) {
         dispatch { $0.handleImageTransferFailed(reason: "send failed: \(reason)") }
+    }
+
+    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int) {
+        dispatch { $0.handleMediaTransferProgress(hash: hash, transferred: transferred, total: total) }
     }
 
     func session(_ session: Session, alreadyHasHash hash: String) -> Bool {

@@ -74,12 +74,12 @@ final class ClipboardMonitor {
         }
 
         // Media takes priority over text.
-        if let (imageData, contentType) = pasteboardMedia(pasteboard) {
-            let digest = SHA256.hash(data: imageData)
+        if let (mediaData, contentType) = pasteboardMedia(pasteboard) {
+            let digest = SHA256.hash(data: mediaData)
             let hash = digest.map { String(format: "%02x", $0) }.joined()
             guard hash != lastHash else { return }
             lastHash = hash
-            onImageChange?(imageData, contentType, hash)
+            onImageChange?(mediaData, contentType, hash)
             return
         }
 
@@ -93,33 +93,44 @@ final class ClipboardMonitor {
         onChange(text)
     }
 
-    /// Returns (imageData, contentType) or nil. TIFF is converted to PNG per spec.
+    /// Returns raw pasteboard media bytes. Multi-resource media is bundled losslessly.
     private func pasteboardMedia(_ pasteboard: NSPasteboard) -> (Data, String)? {
         let maxSize = 20_971_520 // 20 MB
-        if let png = pasteboard.data(forType: .png), png.count <= maxSize {
-            return (png, "image/png")
-        }
-        if let jpeg = pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")),
-           jpeg.count <= maxSize {
-            return (jpeg, "image/jpeg")
-        }
-        if let tiff = pasteboard.data(forType: .tiff),
-           let bitmapRep = NSBitmapImageRep(data: tiff),
-           let png = bitmapRep.representation(using: .png, properties: [:]),
-           png.count <= maxSize {
-            return (png, "image/png")
-        }
-        let mediaTypes: [(NSPasteboard.PasteboardType, String)] = [
+        let candidates: [(NSPasteboard.PasteboardType, String)] = [
+            (.png, "image/png"), (NSPasteboard.PasteboardType("public.jpeg"), "image/jpeg"),
+            (.tiff, "image/tiff"),
+            (NSPasteboard.PasteboardType("public.heic"), "image/heic"),
+            (NSPasteboard.PasteboardType("public.heif"), "image/heif"),
             (NSPasteboard.PasteboardType("public.movie"), "video/quicktime"),
             (NSPasteboard.PasteboardType("public.mpeg-4"), "video/mp4"),
+            (NSPasteboard.PasteboardType("com.apple.quicktime-movie"), "video/quicktime"),
+            (NSPasteboard.PasteboardType("public.image"), "image/*"),
+            (NSPasteboard.PasteboardType("public.video"), "video/*"),
             (NSPasteboard.PasteboardType("public.audio"), "audio/mpeg"),
             (NSPasteboard.PasteboardType("com.adobe.pdf"), "application/pdf")
         ]
-        for (pasteboardType, contentType) in mediaTypes {
-            if let data = pasteboard.data(forType: pasteboardType), data.count <= maxSize {
-                return (data, contentType)
+        var items: [MediaBundle.Item] = []
+        for pasteboardItem in pasteboard.pasteboardItems ?? [] {
+            let hasMotion = pasteboardItem.types.contains(NSPasteboard.PasteboardType("public.movie"))
+                || pasteboardItem.types.contains(NSPasteboard.PasteboardType("com.apple.quicktime-movie"))
+            let matches = hasMotion
+                ? candidates.filter { pasteboardItem.types.contains($0.0) }
+                : Array(candidates.first(where: { pasteboardItem.types.contains($0.0) }).map { [$0] } ?? [])
+            for match in matches {
+                if let data = pasteboardItem.data(forType: match.0), !data.isEmpty {
+                    items.append(.init(mimeType: match.1, data: data))
+                }
             }
         }
-        return nil
+        if items.isEmpty, let match = candidates.first(where: { pasteboard.types?.contains($0.0) == true }),
+           let data = pasteboard.data(forType: match.0), !data.isEmpty {
+            items = [.init(mimeType: match.1, data: data)]
+        }
+        guard !items.isEmpty else { return nil }
+        if items.count == 1, items[0].data.count <= maxSize {
+            return (items[0].data, items[0].mimeType)
+        }
+        let bundled = MediaBundle.encode(items)
+        return bundled.count <= maxSize ? (bundled, MediaBundle.mimeType) : nil
     }
 }

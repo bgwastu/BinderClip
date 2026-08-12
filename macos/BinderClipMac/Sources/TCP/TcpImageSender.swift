@@ -9,7 +9,8 @@ enum TcpImageSender {
         port: UInt16,
         data: Data,
         nonce: Data? = nil,
-        connectTimeoutMs: Int = 3000
+        connectTimeoutMs: Int = 3000,
+        progress: ((Int, Int) -> Void)? = nil
     ) throws {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -65,11 +66,12 @@ enum TcpImageSender {
             guard let baseAddress = rawPtr.baseAddress else { return }
             var offset = 0
             while offset < data.count {
-                let n = write(fd, baseAddress.advanced(by: offset), data.count - offset)
+                let n = write(fd, baseAddress.advanced(by: offset), min(64 * 1024, data.count - offset))
                 if n < 0 {
                     throw TcpTransferError.sendFailed("write() failed: \(errno)")
                 }
                 offset += n
+                progress?(offset, data.count)
             }
         }
     }

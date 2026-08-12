@@ -28,6 +28,7 @@ protocol SessionDelegate: AnyObject {
     func session(_ session: Session, didChangeRichMediaSetting enabled: Bool)
     func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String)
     func session(_ session: Session, imageWasRejected reason: String)
+    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int)
 }
 
 extension SessionDelegate {
@@ -35,6 +36,7 @@ extension SessionDelegate {
     func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String) {}
     func session(_ session: Session, imageWasRejected reason: String) {}
     func session(_ session: Session, imageSendFailed reason: String) {}
+    func session(_ session: Session, mediaTransferProgress hash: String, transferred: Int, total: Int) {}
 }
 
 // MARK: - Session Errors
@@ -589,7 +591,11 @@ final class Session {
                             host: host,
                             port: UInt16(tcpPort),
                             data: encrypted,
-                            nonce: tcpNonce
+                            nonce: tcpNonce,
+                            progress: { [weak self] sent, total in
+                                guard let self else { return }
+                                self.delegate?.session(self, mediaTransferProgress: hash, transferred: sent, total: total)
+                            }
                         )
                         lastError = nil
                         break
@@ -660,7 +666,7 @@ final class Session {
             return
         }
 
-        // Check size <= 10MB
+        // Check size <= 20 MiB
         let maxSize = 20 * 1024 * 1024
         if size > maxSize {
             let rejectJSON: [String: Any] = ["reason": "size_exceeded"]
@@ -712,7 +718,10 @@ final class Session {
             try writeMessage(Message(type: .accept, payload: acceptData))
 
             // Await TCP data
-            let encrypted = try receiver.receive()
+            let encrypted = try receiver.receive { [weak self] received, total in
+                guard let self else { return }
+                self.delegate?.session(self, mediaTransferProgress: hash, transferred: received, total: total)
+            }
 
             // Decrypt
             guard let key = sessionKey else {

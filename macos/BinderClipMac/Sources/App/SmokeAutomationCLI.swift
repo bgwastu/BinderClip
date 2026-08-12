@@ -90,7 +90,7 @@ enum SmokeAutomationCLI {
             changedAt: Int64(Date().timeIntervalSince1970),
             forSecret: token.lowercased()
         )
-        print("Enabled image sync for smoke pairing")
+        print("Enabled media sync for smoke pairing")
         return 0
     }
 

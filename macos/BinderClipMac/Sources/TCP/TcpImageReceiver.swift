@@ -78,7 +78,7 @@ final class TcpImageReceiver {
         return TcpServerInfo(host: localIp, port: port)
     }
 
-    func receive() throws -> Data {
+    func receive(progress: ((Int, Int) -> Void)? = nil) throws -> Data {
         guard serverFd >= 0 else {
             throw TcpTransferError.serverNotStarted
         }
@@ -166,7 +166,7 @@ final class TcpImageReceiver {
             setReceiveTimeout(fd: clientFd, ms: transferTimeoutMs)
 
             do {
-                let data = try readExactly(fd: clientFd, size: expectedSize)
+                let data = try readExactly(fd: clientFd, size: expectedSize, progress: progress)
                 close(clientFd)
                 return data
             } catch {
@@ -201,7 +201,7 @@ final class TcpImageReceiver {
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
-    private func readExactly(fd: Int32, size: Int) throws -> Data {
+    private func readExactly(fd: Int32, size: Int, progress: ((Int, Int) -> Void)? = nil) throws -> Data {
         var buffer = Data(count: size)
         var offset = 0
         while offset < size {
@@ -224,6 +224,7 @@ final class TcpImageReceiver {
                 throw TcpTransferError.receiveFailed("read() failed: \(errno)")
             }
             offset += n
+            progress?(offset, size)
         }
         return buffer
     }

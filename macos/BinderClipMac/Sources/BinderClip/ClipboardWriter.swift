@@ -14,6 +14,14 @@ final class ClipboardWriter {
     func writeMedia(_ data: Data, contentType: String) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        if contentType == MediaBundle.mimeType, let items = MediaBundle.decode(data) {
+            let pasteboardItems = items.map { item in
+                let pasteboardItem = NSPasteboardItem()
+                pasteboardItem.setData(item.data, forType: NSPasteboard.PasteboardType(item.mimeType))
+                return pasteboardItem
+            }
+            return pasteboard.writeObjects(pasteboardItems)
+        }
         let pasteboardType = NSPasteboard.PasteboardType(contentType)
         return pasteboard.setData(data, forType: pasteboardType)
     }

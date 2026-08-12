@@ -15,6 +15,8 @@ final class StatusBarController {
     var isImageSyncEnabled: (() -> Bool)?
     var isDeviceConnected: (() -> Bool)?
     var onCheckForUpdates: (() -> Void)?
+    var isMediaOverlayEnabled: (() -> Bool)?
+    var onToggleMediaOverlay: (() -> Void)?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: 18)
     private let menu = NSMenu()
@@ -237,7 +239,7 @@ final class StatusBarController {
 
         let deviceConnected = isDeviceConnected?() ?? false
         let imageSyncItem = NSMenuItem(
-            title: "Image Sync (experimental)",
+            title: "Media Sync (experimental)",
             action: deviceConnected ? #selector(handleToggleImageSync) : nil,
             keyEquivalent: ""
         )
@@ -265,6 +267,15 @@ final class StatusBarController {
             skipSecretsItem.state = .on
         }
         menu.addItem(skipSecretsItem)
+
+        let overlayItem = NSMenuItem(
+            title: "Media Transfer Progress Overlay",
+            action: #selector(handleToggleMediaOverlay),
+            keyEquivalent: ""
+        )
+        overlayItem.target = self
+        overlayItem.state = isMediaOverlayEnabled?() == true ? .on : .off
+        menu.addItem(overlayItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -375,6 +386,12 @@ final class StatusBarController {
     @objc
     private func handleCheckForUpdates() {
         onCheckForUpdates?()
+    }
+
+    @objc
+    private func handleToggleMediaOverlay() {
+        onToggleMediaOverlay?()
+        renderMenu()
     }
 
 

@@ -712,6 +712,7 @@ class ClipboardService : Service(), L2capServerCallback {
 
     private fun handleImageSendFailed(reason: String) {
         Log.w(TAG, "Image send failed: $reason")
+        Handler(Looper.getMainLooper()).post { mediaOverlay.dismiss() }
         Handler(Looper.getMainLooper()).post {
             android.widget.Toast.makeText(
                 this,

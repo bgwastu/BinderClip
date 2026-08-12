@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enableLaunchAtLoginIfFirstRun()
         installSleepWakeObservers()
         _ = updaterController
+        updaterController.updater.checkForUpdatesInBackground()
 
         statusBarController.onPairNewDeviceRequested = { [weak self] in
             self?.startPairing()
@@ -416,6 +417,7 @@ extension AppDelegate: ConnectionControllerDelegate {
 
     func didSyncClipboard(hash: String) {
         statusBarController.flashSyncIndicator()
+        mediaOverlayController.dismiss()
     }
 
     func didChangeImageSyncSetting(enabled: Bool) {

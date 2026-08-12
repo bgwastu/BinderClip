@@ -24,28 +24,17 @@ jobs:
           install -m 0755 bws /usr/local/bin/bws
           rm -f bws.zip bws
 
-      - name: Load Sparkle signing secrets
-        env:
-          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
-        run: |
-          test -n "$BWS_ACCESS_TOKEN"
-          bws secret list 5b428380-80fb-459b-959c-b4a4009c3b7d -o env > bws-sparkle.env
-          sed -i.bak '/^BWS_ACCESS_TOKEN=/d' bws-sparkle.env
-          while IFS='=' read -r key value; do
-            echo "::add-mask::$value"
-          done < bws-sparkle.env
-          cat bws-sparkle.env >> "$GITHUB_ENV"
-          rm -f bws-sparkle.env bws-sparkle.env.bak
-
       - name: Build app and DMG
         env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
-        run: ./macos/package-release.sh
+        run: bws run --project-id 5b428380-80fb-459b-959c-b4a4009c3b7d -- ./macos/package-release.sh
 
       - name: Generate Sparkle appcast
         env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
         run: |
           SPARKLE_BIN="macos/BinderClipMac/.build/artifacts/sparkle/Sparkle/bin"
@@ -53,14 +42,14 @@ jobs:
             SPARKLE_BIN="macos/BinderClipMac/.build/release-package/arm64/artifacts/sparkle/Sparkle/bin"
           fi
           test -x "$SPARKLE_BIN/generate_appcast"
-          test -n "$SPARKLE_PRIVATE_ED_KEY"
           mkdir -p appcast-input
           cp dist/BinderClip-*.zip appcast-input/
-          printf '%s' "$SPARKLE_PRIVATE_ED_KEY" |
-          "$SPARKLE_BIN/generate_appcast" \
-            --ed-key-file - \
-            --download-url-prefix "$RELEASE_URL" \
-            appcast-input
+          bws run --project-id 5b428380-80fb-459b-959c-b4a4009c3b7d -- \
+            sh -c 'printf "%s" "$SPARKLE_PRIVATE_ED_KEY" | \
+              "'$SPARKLE_BIN'/generate_appcast" \
+              --ed-key-file - \
+              --download-url-prefix "'$RELEASE_URL'" \
+              appcast-input'
           cp appcast-input/appcast.xml dist/appcast.xml
 
       - name: Upload release assets

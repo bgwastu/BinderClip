@@ -69,7 +69,11 @@ final class CustomUpdater {
     }
 
     private func fetchUpdateItem() async throws -> UpdateFeedItem? {
-        let (data, response) = try await URLSession.shared.data(from: Self.feedURL)
+        var components = URLComponents(url: Self.feedURL, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "t", value: String(Int(Date().timeIntervalSince1970)))]
+        var request = URLRequest(url: components?.url ?? Self.feedURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw CustomUpdaterError.invalidFeed }
         let parser = FeedParser()
         parser.parse(data)

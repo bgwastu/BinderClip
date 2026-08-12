@@ -1,8 +1,7 @@
-// Persists paired device records in Keychain and derives per-device encryption keys.
+// Persists paired device records locally and derives per-device encryption keys.
 
 import CryptoKit
 import Foundation
-import Security
 import os
 
 private let pairingLogger = Logger(subsystem: "net.wastu.clipboard", category: "Pairing")
@@ -56,7 +55,7 @@ final class PairingManager {
     /// app is not running.
     private var devicesCache: [PairedDevice]?
 
-    init(keychain: SecretStore = KeychainStore(service: "clipboard")) {
+    init(keychain: SecretStore = FileSecretStore()) {
         self.keychain = keychain
     }
 

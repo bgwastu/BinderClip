@@ -4,14 +4,15 @@ import Darwin
 /// Fixed-port TCP control channel. Session remains responsible for authentication.
 final class TcpControlTransport {
     static let port: UInt16 = 39421
-    private let queue = DispatchQueue(label: "net.wastu.clipboard.tcp-control")
+    private let listenerQueue = DispatchQueue(label: "net.wastu.clipboard.tcp-control.listener")
+    private let connectQueue = DispatchQueue(label: "net.wastu.clipboard.tcp-control.connect")
     private var listenerFD: Int32 = -1
     private var closed = false
     var onConnection: ((InputStream, OutputStream) -> Void)?
     var onOutgoingConnection: ((InputStream, OutputStream) -> Void)?
 
     func start() {
-        queue.async { [weak self] in
+        listenerQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             let fd = socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else { return }
@@ -33,7 +34,7 @@ final class TcpControlTransport {
     }
 
     func connect(addresses: [String]) {
-        queue.async { [weak self] in
+        connectQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             for host in addresses {
                 let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -78,7 +79,7 @@ final class TcpControlTransport {
     }
 
     func close() {
-        queue.async { [weak self] in
+        listenerQueue.async { [weak self] in
             guard let self else { return }
             self.closed = true
             if self.listenerFD >= 0 { Darwin.close(self.listenerFD); self.listenerFD = -1 }

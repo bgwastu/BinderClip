@@ -28,6 +28,9 @@ final class StatusBarController {
 
     private var binderStatusBarImage: NSImage?
     private var syncPulseTimer: Timer?
+    private var updateAnimationTimer: Timer?
+    private var updateStatus: UpdateStatus = .idle
+    private var updateAnimationStep = 0
 
     init() {
         binderStatusBarImage = loadStatusBarIcon(named: "BinderClipMenuIcon")
@@ -155,6 +158,22 @@ final class StatusBarController {
     func setNotificationPermissionWarning(_ warning: String?, action: (() -> Void)? = nil) {
         notificationPermissionWarning = warning
         notificationPermissionAction = action
+        renderMenu()
+    }
+
+    func setUpdateStatus(_ status: UpdateStatus) {
+        updateStatus = status
+        updateAnimationTimer?.invalidate()
+        updateAnimationTimer = nil
+        updateAnimationStep = 0
+        if case .checking = status {
+            updateAnimationStep = 1
+            updateAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.updateAnimationStep = self.updateAnimationStep == 3 ? 1 : self.updateAnimationStep + 1
+                self.renderMenu()
+            }
+        }
         renderMenu()
     }
 
@@ -289,11 +308,25 @@ final class StatusBarController {
 
         menu.addItem(NSMenuItem.separator())
 
-        let updateItem = NSMenuItem(
-            title: "Check for Updates...",
-            action: #selector(handleCheckForUpdates),
-            keyEquivalent: ""
-        )
+        let updateTitle: String
+        let updateAction: Selector?
+        let updateIconName: String
+        switch updateStatus {
+        case .idle:
+            updateTitle = "Check for Updates\u{2026}"
+            updateAction = #selector(handleCheckForUpdates)
+            updateIconName = "arrow.down.circle"
+        case .checking:
+            updateTitle = "Checking for updates" + String(repeating: ".", count: updateAnimationStep)
+            updateAction = nil
+            updateIconName = "arrow.triangle.2.circlepath"
+        case .updated(let version):
+            updateTitle = "Updated to v\(version)!"
+            updateAction = nil
+            updateIconName = "checkmark.circle.fill"
+        }
+        let updateItem = NSMenuItem(title: updateTitle, action: updateAction, keyEquivalent: "")
+        updateItem.image = NSImage(systemSymbolName: updateIconName, accessibilityDescription: "Software updates")
         updateItem.target = self
         menu.addItem(updateItem)
 

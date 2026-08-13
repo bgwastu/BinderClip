@@ -51,7 +51,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
-        updater.checkAndInstall(interactive: false)
+        updater.onStatusChange = { [weak self] status in
+            self?.statusBarController.setUpdateStatus(status)
+        }
+        let pendingUpdatedVersion = UserDefaults.standard.string(forKey: "BinderClipPendingUpdatedVersion")
+        if let pendingUpdatedVersion {
+            UserDefaults.standard.removeObject(forKey: "BinderClipPendingUpdatedVersion")
+            statusBarController.setUpdateStatus(.updated(pendingUpdatedVersion))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.statusBarController.setUpdateStatus(.idle)
+            }
+        } else {
+            updater.checkAndInstall(interactive: false)
+        }
         mediaOverlayController.onCancel = { [weak self] in
             self?.connectionController?.cancelMediaTransfer()
         }

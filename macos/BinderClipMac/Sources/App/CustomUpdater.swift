@@ -23,6 +23,12 @@ enum CustomUpdaterError: LocalizedError {
     }
 }
 
+enum UpdateStatus {
+    case idle
+    case checking
+    case updated(String)
+}
+
 private struct UpdateFeedItem {
     let version: String
     let shortVersion: String
@@ -41,6 +47,7 @@ final class CustomUpdater {
     private static let logger = Logger(subsystem: "net.wastu.clipboard", category: "Updater")
 
     private var isUpdating = false
+    var onStatusChange: ((UpdateStatus) -> Void)?
 
     func checkAndInstall(interactive: Bool) {
         guard !isUpdating else {
@@ -48,16 +55,19 @@ final class CustomUpdater {
             return
         }
         isUpdating = true
+        onStatusChange?(.checking)
         Task { @MainActor [weak self] in
             do {
                 guard let self else { return }
                 guard let item = try await self.fetchUpdateItem(), self.isNewer(item) else {
                     self.isUpdating = false
+                    self.onStatusChange?(.idle)
                     return
                 }
                 try await self.downloadAndInstall(item)
             } catch {
                 self?.isUpdating = false
+                self?.onStatusChange?(.idle)
                 Self.logger.error("Update failed: \(error.localizedDescription, privacy: .public)")
                 guard interactive else { return }
                 let message = error.localizedDescription
@@ -110,6 +120,7 @@ final class CustomUpdater {
         helper.executableURL = Bundle.main.executableURL
         helper.arguments = [Self.helperArgument, candidate.path, Bundle.main.bundlePath,
                             String(ProcessInfo.processInfo.processIdentifier)]
+        UserDefaults.standard.set(item.shortVersion, forKey: "BinderClipPendingUpdatedVersion")
         try helper.run()
         await MainActor.run { NSApp.terminate(nil) }
     }

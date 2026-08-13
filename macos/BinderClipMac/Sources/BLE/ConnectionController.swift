@@ -247,7 +247,8 @@ class ConnectionController: NSObject {
         let provider = DeviceSettingsProvider(pairingManager: pairingManager, secret: device.sharedSecret)
         let session = Session(inputStream: input, outputStream: output, isInitiator: isInitiator,
                               delegate: adapter, sharedSecretHex: isInitiator ? device.sharedSecret : nil,
-                              candidateSecretHexes: isInitiator ? [] : paired.map(\.sharedSecret))
+                              candidateSecretHexes: isInitiator ? [] : paired.map(\.sharedSecret),
+                              requiresMediaPaste: !isInitiator)
         session.localName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         session.settingsProvider = provider
         let record = devices[device.sharedSecret] ?? DeviceConnection(token: device.sharedSecret)
@@ -761,6 +762,18 @@ extension ConnectionController {
         }
     }
 
+    func requestPendingMediaPaste() {
+        queue.async { [self] in
+            devices.values.forEach { $0.state.session?.requestMediaPaste() }
+        }
+    }
+
+    func cancelPendingMediaOffers() {
+        queue.async { [self] in
+            devices.values.forEach { $0.state.session?.cancelPendingMediaOffer() }
+        }
+    }
+
     // MARK: Device Management
 
     func forgetDevice(token: String, completion: (() -> Void)? = nil) {
@@ -1087,7 +1100,8 @@ extension ConnectionController {
         if let device {
             let settingsProvider = DeviceSettingsProvider(pairingManager: pairingManager, secret: device.token)
             session = Session(inputStream: inputStream, outputStream: outputStream,
-                              isInitiator: true, delegate: adapter, sharedSecretHex: device.token)
+                              isInitiator: true, delegate: adapter, sharedSecretHex: device.token,
+                              requiresMediaPaste: true)
             session.localName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
             session.settingsProvider = settingsProvider
             device.adapter = adapter
@@ -1361,6 +1375,10 @@ class SessionAdapter: NSObject, SessionDelegate {
 
     func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int) {
         dispatch { $0.handleMediaTransferProgress(hash: hash, fileName: fileName, transferred: transferred, total: total) }
+    }
+
+    func sessionHasPendingMediaPaste(_ session: Session) {
+        // The monitor will approve the offer when the user presses Cmd-V.
     }
 
     func session(_ session: Session, alreadyHasHash hash: String) -> Bool {

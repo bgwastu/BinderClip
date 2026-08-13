@@ -47,6 +47,8 @@ final class ClipboardMonitor {
 
     /// Callback for image changes: (imageData, contentType, hash)
     var onImageChange: ((Data, String, String, String?) -> Void)?
+    var onPaste: (() -> Void)?
+    var onLocalClipboardChange: (() -> Void)?
 
     init(pollInterval: TimeInterval = ClipboardMonitor.defaultPollInterval, onChange: @escaping (String) -> Void) {
         self.pollInterval = pollInterval
@@ -79,6 +81,7 @@ final class ClipboardMonitor {
         let digest = SHA256.hash(data: data)
         lastHash = digest.map { String(format: "%02x", $0) }.joined()
         lastChangeCount = pasteboard.changeCount
+        onLocalClipboardChange?()
         pendingMedia = nil
     }
 
@@ -92,6 +95,7 @@ final class ClipboardMonitor {
     private func poll() {
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
+        onLocalClipboardChange?()
 
         // Don't sync password-manager / secret copies that mark themselves concealed (#70).
         // Check every item's types: pasteboard.types only reflects the first item.
@@ -149,9 +153,13 @@ final class ClipboardMonitor {
     }
 
     private func sendPendingMedia() {
-        guard let pendingMedia else { return }
-        onImageChange?(pendingMedia.0, pendingMedia.1, pendingMedia.2, pendingMedia.3)
-        self.pendingMedia = nil
+        if let pendingMedia {
+            onLocalClipboardChange?()
+            onImageChange?(pendingMedia.0, pendingMedia.1, pendingMedia.2, pendingMedia.3)
+            self.pendingMedia = nil
+        } else {
+            onPaste?()
+        }
     }
 
     /// Returns raw pasteboard media bytes. Multi-resource media is bundled losslessly.

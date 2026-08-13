@@ -127,6 +127,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardMonitor?.onImageChange = { [weak self] imageData, contentType, _, fileName in
             self?.connectionController?.sendImage(imageData, contentType: contentType, fileName: fileName)
         }
+        clipboardMonitor?.onPaste = { [weak self] in
+            self?.connectionController?.requestPendingMediaPaste()
+        }
+        clipboardMonitor?.onLocalClipboardChange = { [weak self] in
+            self?.connectionController?.cancelPendingMediaOffers()
+        }
 
         // Start monitoring
         clipboardMonitor?.start()

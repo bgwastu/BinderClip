@@ -29,6 +29,7 @@ protocol SessionDelegate: AnyObject {
     func session(_ session: Session, didReceiveImage data: Data, contentType: String, fileName: String?, hash: String)
     func session(_ session: Session, imageWasRejected reason: String)
     func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int)
+    func sessionHasPendingMediaPaste(_ session: Session)
 }
 
 extension SessionDelegate {
@@ -37,6 +38,7 @@ extension SessionDelegate {
     func session(_ session: Session, imageWasRejected reason: String) {}
     func session(_ session: Session, imageSendFailed reason: String) {}
     func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int) {}
+    func sessionHasPendingMediaPaste(_ session: Session) {}
 }
 
 // MARK: - Session Errors
@@ -118,6 +120,11 @@ final class Session {
     /// Shared secret hex string for deriving auth and session keys.
     private var sharedSecretHex: String?
     private let candidateSecretHexes: [String]
+    private let requiresMediaPaste: Bool
+    private let mediaGate = DispatchSemaphore(value: 0)
+    private let mediaGateLock = NSLock()
+    private var mediaGateDecision: Bool?
+    private var mediaOfferPending = false
 
     /// Auth key derived from the shared secret, used for HMAC authentication during handshake.
     private var authKey: SymmetricKey?
@@ -132,7 +139,8 @@ final class Session {
           isInitiator: Bool, delegate: SessionDelegate,
           mode: SessionMode = .normal,
           sharedSecretHex: String? = nil,
-          candidateSecretHexes: [String] = []) {
+          candidateSecretHexes: [String] = [],
+          requiresMediaPaste: Bool = false) {
         self.inputStream = inputStream
         self.outputStream = outputStream
         self.isInitiator = isInitiator
@@ -140,6 +148,7 @@ final class Session {
         self.delegate = delegate
         self.sharedSecretHex = sharedSecretHex
         self.candidateSecretHexes = candidateSecretHexes
+        self.requiresMediaPaste = requiresMediaPaste
         self.matchedSecretHex = sharedSecretHex
 
         // Derive auth key from shared secret if available
@@ -486,6 +495,24 @@ final class Session {
         queueLock.unlock()
     }
 
+    func requestMediaPaste() {
+        mediaGateLock.lock()
+        if mediaOfferPending {
+            mediaGateDecision = true
+            mediaGate.signal()
+        }
+        mediaGateLock.unlock()
+    }
+
+    func cancelPendingMediaOffer() {
+        mediaGateLock.lock()
+        if mediaOfferPending {
+            mediaGateDecision = false
+            mediaGate.signal()
+        }
+        mediaGateLock.unlock()
+    }
+
     private func dequeueImage() -> (Data, String, String?)? {
         queueLock.lock()
         defer { queueLock.unlock() }
@@ -695,6 +722,27 @@ final class Session {
 
         // Cancel any in-flight transfer
         activeReceiver?.cancel()
+
+        if requiresMediaPaste {
+            mediaGateLock.lock()
+            mediaGateDecision = nil
+            mediaOfferPending = true
+            mediaGateLock.unlock()
+            delegate?.sessionHasPendingMediaPaste(self)
+            let result = mediaGate.wait(timeout: .now() + transferTimeoutSeconds)
+            mediaGateLock.lock()
+            let accepted = result == .success && mediaGateDecision == true
+            mediaOfferPending = false
+            mediaGateDecision = nil
+            mediaGateLock.unlock()
+            guard accepted else {
+                let reason = result == .timedOut ? "paste_required" : "superseded"
+                let rejectJSON: [String: Any] = ["reason": reason]
+                let rejectData = try JSONSerialization.data(withJSONObject: rejectJSON)
+                try writeMessage(Message(type: .reject, payload: rejectData))
+                return
+            }
+        }
 
         // Only use nonce validation when the sender advertises support;
         // old senders without supportsNonce fall back to IP validation.

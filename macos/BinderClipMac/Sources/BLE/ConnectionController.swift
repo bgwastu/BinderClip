@@ -1150,6 +1150,9 @@ extension ConnectionController {
             }
         }
         pairingManager.updateAddresses(session.remoteAddresses, forSecret: resolvedDevice.token)
+        if !session.remoteAddresses.isEmpty {
+            tcpTransport?.connect(addresses: session.remoteAddresses)
+        }
         resolvedDevice.state = .ready(session)
         resolvedDevice.backoff.reset()
         resolvedDevice.nextAttemptAt = .distantPast

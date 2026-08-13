@@ -2,6 +2,8 @@
 
 import AppKit
 import CryptoKit
+import os
+import ApplicationServices
 
 final class ClipboardMonitor {
     static let defaultPollInterval: TimeInterval = {
@@ -38,6 +40,10 @@ final class ClipboardMonitor {
     private var timer: Timer?
     private var lastChangeCount: Int
     private var lastHash: String?
+    private var pendingMedia: (Data, String, String, String?)?
+    private var eventMonitors: [Any] = []
+    private var pasteMonitoringTrusted = false
+    private let logger = Logger(subsystem: "net.wastu.clipboard", category: "Clipboard")
 
     /// Callback for image changes: (imageData, contentType, hash)
     var onImageChange: ((Data, String, String, String?) -> Void)?
@@ -53,11 +59,34 @@ final class ClipboardMonitor {
             self?.poll()
         }
         RunLoop.main.add(timer!, forMode: .common)
+        refreshPasteMonitoring()
+    }
+
+    static var isAccessibilityTrusted: Bool {
+        AXIsProcessTrusted()
+    }
+
+    func refreshPasteMonitoring() {
+        let trusted = Self.isAccessibilityTrusted
+        guard trusted != pasteMonitoringTrusted || eventMonitors.isEmpty else { return }
+        eventMonitors.forEach { NSEvent.removeMonitor($0) }
+        eventMonitors.removeAll()
+        pasteMonitoringTrusted = trusted
+        installPasteMonitors()
+    }
+
+    func suppressNextMediaTransfer(data: Data) {
+        let digest = SHA256.hash(data: data)
+        lastHash = digest.map { String(format: "%02x", $0) }.joined()
+        lastChangeCount = pasteboard.changeCount
+        pendingMedia = nil
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        eventMonitors.forEach { NSEvent.removeMonitor($0) }
+        eventMonitors.removeAll()
     }
 
     private func poll() {
@@ -81,9 +110,11 @@ final class ClipboardMonitor {
             lastHash = hash
             let fileName = pasteboard.string(forType: NSPasteboard.PasteboardType("public.file-url"))
                 .flatMap { URL(string: $0)?.lastPathComponent }
-            onImageChange?(mediaData, contentType, hash, fileName)
+            pendingMedia = (mediaData, contentType, hash, fileName)
             return
         }
+
+        pendingMedia = nil
 
         guard let text = pasteboard.string(forType: .string), !text.isEmpty else { return }
         guard text.utf8.count <= 102_400 else { return }
@@ -93,6 +124,34 @@ final class ClipboardMonitor {
         guard hash != lastHash else { return }
         lastHash = hash
         onChange(text)
+    }
+
+    private func installPasteMonitors() {
+        let handler: (NSEvent) -> NSEvent? = { [weak self] event in
+            guard event.type == .keyDown,
+                  event.keyCode == 9,
+                  event.modifierFlags.contains(.command),
+                  !event.modifierFlags.contains(.control) else { return event }
+            self?.sendPendingMedia()
+            return event
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler) {
+            eventMonitors.append(local)
+        }
+        if pasteMonitoringTrusted,
+           let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { event in
+               _ = handler(event)
+           }) {
+            eventMonitors.append(global)
+        } else if !pasteMonitoringTrusted {
+            logger.warning("Global paste monitoring unavailable; grant BinderClip Accessibility permission to enable paste-triggered media sync")
+        }
+    }
+
+    private func sendPendingMedia() {
+        guard let pendingMedia else { return }
+        onImageChange?(pendingMedia.0, pendingMedia.1, pendingMedia.2, pendingMedia.3)
+        self.pendingMedia = nil
     }
 
     /// Returns raw pasteboard media bytes. Multi-resource media is bundled losslessly.

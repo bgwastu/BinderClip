@@ -112,7 +112,7 @@ enum ConnectionError {
 protocol ConnectionControllerDelegate: AnyObject {
     func didChangeState(connectedTokens: [String])
     func didReceiveClipboard(text: String)
-    func didReceiveImage(data: Data, contentType: String)
+    func didReceiveImage(data: Data, contentType: String, fileName: String?)
     func didCompletePairing(deviceName: String?)
     func didEncounterError(error: ConnectionError)
     func didUpdateBluetoothState(state: CBManagerState)
@@ -1209,11 +1209,11 @@ extension ConnectionController {
         }
     }
 
-    fileprivate func handleImageReceived(data: Data, contentType: String, hash: String) {
+    fileprivate func handleImageReceived(data: Data, contentType: String, fileName: String?, hash: String) {
         lastReceivedImageHash = hash
         log("Received image (\(data.count) bytes, \(contentType))")
         DispatchQueue.main.async { [weak self] in
-            self?.delegate?.didReceiveImage(data: data, contentType: contentType)
+            self?.delegate?.didReceiveImage(data: data, contentType: contentType, fileName: fileName)
         }
     }
 
@@ -1335,8 +1335,8 @@ class SessionAdapter: NSObject, SessionDelegate {
         dispatch { $0.handleClipboardReceived(plaintext: plaintext, hash: hash) }
     }
 
-    func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String) {
-        dispatch { $0.handleImageReceived(data: data, contentType: contentType, hash: hash) }
+    func session(_ session: Session, didReceiveImage data: Data, contentType: String, fileName: String?, hash: String) {
+        dispatch { $0.handleImageReceived(data: data, contentType: contentType, fileName: fileName, hash: hash) }
     }
 
     func session(_ session: Session, didCompleteTransfer hash: String) {

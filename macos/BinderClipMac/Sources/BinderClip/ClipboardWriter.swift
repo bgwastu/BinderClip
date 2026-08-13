@@ -1,6 +1,7 @@
 // Writes received text to the macOS system pasteboard.
 
 import AppKit
+import UniformTypeIdentifiers
 
 final class ClipboardWriter {
     @discardableResult
@@ -11,19 +12,33 @@ final class ClipboardWriter {
     }
 
     @discardableResult
-    func writeMedia(_ data: Data, contentType: String) -> Bool {
+    func writeMedia(_ data: Data, contentType: String, fileName: String? = nil) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         if contentType == MediaBundle.mimeType, let items = MediaBundle.decode(data) {
             let pasteboardItems = items.map { item in
                 let pasteboardItem = NSPasteboardItem()
-                pasteboardItem.setData(item.data, forType: NSPasteboard.PasteboardType(item.mimeType))
+                pasteboardItem.setData(item.data, forType: pasteboardType(for: item.mimeType))
                 return pasteboardItem
             }
-            return pasteboard.writeObjects(pasteboardItems)
+            let success = pasteboard.writeObjects(pasteboardItems)
+            if success, let fileName {
+                pasteboard.setString(fileName, forType: NSPasteboard.PasteboardType("com.apple.pasteboard.promised-suggested-file-name"))
+            }
+            return success
         }
-        let pasteboardType = NSPasteboard.PasteboardType(contentType)
-        return pasteboard.setData(data, forType: pasteboardType)
+        let success = pasteboard.setData(data, forType: pasteboardType(for: contentType))
+        if success, let fileName {
+            pasteboard.setString(fileName, forType: NSPasteboard.PasteboardType("com.apple.pasteboard.promised-suggested-file-name"))
+        }
+        return success
+    }
+
+    private func pasteboardType(for mimeType: String) -> NSPasteboard.PasteboardType {
+        if let type = UTType(mimeType: mimeType) {
+            return NSPasteboard.PasteboardType(type.identifier)
+        }
+        return NSPasteboard.PasteboardType(mimeType)
     }
 
     func writeImage(_ data: Data, contentType: String) -> Bool {

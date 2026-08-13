@@ -1651,7 +1651,7 @@ final class TestSessionDelegate: SessionDelegate {
     func session(_ session: Session, didChangeRichMediaSetting enabled: Bool) {
         onRichMediaChanged(session, enabled)
     }
-    func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String) {
+    func session(_ session: Session, didReceiveImage data: Data, contentType: String, fileName: String?, hash: String) {
         onImageReceived(session, data, contentType, hash)
     }
     func session(_ session: Session, imageWasRejected reason: String) {

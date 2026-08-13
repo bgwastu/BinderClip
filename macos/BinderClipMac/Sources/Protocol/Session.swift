@@ -26,14 +26,14 @@ protocol SessionDelegate: AnyObject {
     func session(_ session: Session, alreadyHasHash hash: String) -> Bool
     func session(_ session: Session, didCompletePairingWithSecret sharedSecret: Data, remoteName: String?)
     func session(_ session: Session, didChangeRichMediaSetting enabled: Bool)
-    func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String)
+    func session(_ session: Session, didReceiveImage data: Data, contentType: String, fileName: String?, hash: String)
     func session(_ session: Session, imageWasRejected reason: String)
     func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int)
 }
 
 extension SessionDelegate {
     func session(_ session: Session, didChangeRichMediaSetting enabled: Bool) {}
-    func session(_ session: Session, didReceiveImage data: Data, contentType: String, hash: String) {}
+    func session(_ session: Session, didReceiveImage data: Data, contentType: String, fileName: String?, hash: String) {}
     func session(_ session: Session, imageWasRejected reason: String) {}
     func session(_ session: Session, imageSendFailed reason: String) {}
     func session(_ session: Session, mediaTransferProgress hash: String, fileName: String?, transferred: Int, total: Int) {}
@@ -762,7 +762,7 @@ final class Session {
             try writeMessage(Message(type: .done, payload: doneData))
 
             // Notify delegate
-            delegate?.session(self, didReceiveImage: plaintext, contentType: contentType, hash: hash)
+            delegate?.session(self, didReceiveImage: plaintext, contentType: contentType, fileName: fileName, hash: hash)
         } catch let error as TcpTransferError {
             let errorJSON: [String: Any] = ["code": "transfer_failed"]
             let errorData = (try? JSONSerialization.data(withJSONObject: errorJSON)) ?? Data()

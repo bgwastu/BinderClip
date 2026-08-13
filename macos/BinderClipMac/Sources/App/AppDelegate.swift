@@ -1,6 +1,7 @@
 // Core app delegate: wires together BLE, clipboard, pairing, and UI subsystems.
 
 import AppKit
+import ApplicationServices
 import Carbon
 import CoreBluetooth
 import CryptoKit
@@ -30,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var awaitingNewPairingConnection = false
     private var launchedAsLoginItem = false
     private var bluetoothOffDebounceTimer: Timer?
+    private var accessibilityPermissionTimer: Timer?
     private var lastWakeTime: Date?
     // A manual Bluetooth toggle surfaces the indicator immediately. The only debounce is for
     // the brief off→on cycle right after wake (sleep automations re-enabling Bluetooth): within
@@ -45,6 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pairingManager.removePendingDevices()
         enableLaunchAtLoginIfFirstRun()
         installSleepWakeObservers()
+        refreshAccessibilityPermission()
+        accessibilityPermissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshAccessibilityPermission()
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(handleApplicationDidBecomeActive),
@@ -174,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bluetoothOffDebounceTimer?.invalidate()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         clipboardMonitor?.stop()
+        accessibilityPermissionTimer?.invalidate()
         connectionController?.disconnect()
     }
 
@@ -213,6 +220,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let targets = [
             "x-apple.systempreferences:com.apple.preference.notifications",
             "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        ]
+        for target in targets {
+            if let url = URL(string: target), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
+    private func refreshAccessibilityPermission() {
+        let trusted = AXIsProcessTrusted()
+        clipboardMonitor?.refreshPasteMonitoring()
+        if trusted {
+            statusBarController.setAccessibilityPermissionWarning(nil)
+        } else {
+            statusBarController.setAccessibilityPermissionWarning(
+                "Allow Accessibility for BinderClip"
+            ) { [weak self] in
+                self?.openAccessibilitySettings()
+            }
+        }
+    }
+
+    private func openAccessibilitySettings() {
+        let targets = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
         ]
         for target in targets {
             if let url = URL(string: target), NSWorkspace.shared.open(url) { return }
@@ -387,10 +418,11 @@ extension AppDelegate: ConnectionControllerDelegate {
         statusBarController.flashSyncIndicator()
     }
 
-    func didReceiveImage(data: Data, contentType: String) {
-        if !clipboardWriter.writeMedia(data, contentType: contentType) {
+    func didReceiveImage(data: Data, contentType: String, fileName: String?) {
+        if !clipboardWriter.writeMedia(data, contentType: contentType, fileName: fileName) {
             appLogger.error("[App] Failed to write received image to the pasteboard")
         }
+        clipboardMonitor?.suppressNextMediaTransfer(data: data)
         statusBarController.flashSyncIndicator()
         mediaOverlayController.dismiss()
     }

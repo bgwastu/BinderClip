@@ -25,6 +25,8 @@ final class StatusBarController {
     private var bluetoothWarningAction: (() -> Void)?
     private var notificationPermissionWarning: String?
     private var notificationPermissionAction: (() -> Void)?
+    private var accessibilityPermissionWarning: String?
+    private var accessibilityPermissionAction: (() -> Void)?
 
     private var binderStatusBarImage: NSImage?
     private var syncPulseTimer: Timer?
@@ -161,6 +163,12 @@ final class StatusBarController {
         renderMenu()
     }
 
+    func setAccessibilityPermissionWarning(_ warning: String?, action: (() -> Void)? = nil) {
+        accessibilityPermissionWarning = warning
+        accessibilityPermissionAction = action
+        renderMenu()
+    }
+
     func setUpdateStatus(_ status: UpdateStatus) {
         updateStatus = status
         updateAnimationTimer?.invalidate()
@@ -247,6 +255,19 @@ final class StatusBarController {
             item.image = NSImage(systemSymbolName: "bell.badge.fill", accessibilityDescription: "notifications")
             item.target = self
             item.isEnabled = notificationPermissionAction != nil
+            menu.addItem(item)
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        if let accessibilityPermissionWarning {
+            let item = NSMenuItem(
+                title: accessibilityPermissionWarning,
+                action: #selector(handleAccessibilityPermissionSelected),
+                keyEquivalent: ""
+            )
+            item.image = NSImage(systemSymbolName: "accessibility", accessibilityDescription: "Accessibility")
+            item.target = self
+            item.isEnabled = accessibilityPermissionAction != nil
             menu.addItem(item)
             menu.addItem(NSMenuItem.separator())
         }
@@ -408,6 +429,11 @@ final class StatusBarController {
     @objc
     private func handleNotificationPermissionSelected() {
         notificationPermissionAction?()
+    }
+
+    @objc
+    private func handleAccessibilityPermissionSelected() {
+        accessibilityPermissionAction?()
     }
 
     @objc

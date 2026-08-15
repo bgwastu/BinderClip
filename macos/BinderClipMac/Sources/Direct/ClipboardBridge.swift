@@ -14,7 +14,12 @@ final class ClipboardBridge {
 
     var isAccessDenied: Bool {
         guard #available(macOS 15.4, *) else { return false }
-        return pasteboard.accessBehavior == .alwaysDeny
+        let sel = NSSelectorFromString("accessBehavior")
+        guard pasteboard.responds(to: sel),
+              let value = pasteboard.value(forKey: "accessBehavior") as? NSNumber else {
+            return false
+        }
+        return value.intValue == 1
     }
 
     func start() {

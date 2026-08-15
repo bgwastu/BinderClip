@@ -87,14 +87,17 @@ class BinderClipService : Service() {
     private val reconnectAttempts = AtomicInteger(0)
     private var scheduledReconnectFuture: ScheduledFuture<*>? = null
     private var meshScanFuture: ScheduledFuture<*>? = null
+
     @Volatile
     private var uiVisible = false
     private var suppressClipboard: String? = null
     private var suppressImageHash: String? = null
     private var pendingImage: ImagePayload? = null
     private var transferStatus: String? = null
+
     @Volatile
     private var rootAvailable = false
+
     @Volatile
     private var automaticClipboardEnabled = false
     private var rootPoll: ScheduledFuture<*>? = null
@@ -246,6 +249,7 @@ class BinderClipService : Service() {
                     client.requestInvite()
                 }
             }
+
             ACTION_COPY_PENDING -> {
                 store.pendingText?.let { text ->
                     applyText(text)
@@ -382,13 +386,20 @@ class BinderClipService : Service() {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    resetReconnectBackoffAndTrigger("network_available")
+                    // Network path changed (e.g. mesh VPN toggled, Wi-Fi switched).
+                    // Force the client to reconnect so it doesn't show a stale
+                    // "connected" over a dead route.
+                    forceReconnect("network_available")
                 }
 
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
                     if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                        resetReconnectBackoffAndTrigger("network_capabilities")
+                        forceReconnect("network_capabilities")
                     }
+                }
+
+                override fun onLost(network: Network) {
+                    forceReconnect("network_lost")
                 }
             }
             val request = NetworkRequest.Builder()
@@ -396,6 +407,19 @@ class BinderClipService : Service() {
                 .build()
             cm.registerNetworkCallback(request, callback)
             networkCallback = callback
+        }
+    }
+
+    /** Close the current connection and reconnect immediately so a network
+     *  change never leaves the UI showing a stale "connected" state. */
+    private fun forceReconnect(reason: String) {
+        reconnectAttempts.set(0)
+        scheduledReconnectFuture?.cancel(false)
+        scheduledReconnectFuture = null
+        if (store.peer != null && !store.hosting) {
+            executor.execute {
+                client.reconnect()
+            }
         }
     }
 
@@ -451,7 +475,9 @@ class BinderClipService : Service() {
             runCatching {
                 nsdManager.resolveService(service, object : NsdManager.ResolveListener {
                     override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
-                    override fun onServiceResolved(serviceInfo: NsdServiceInfo) { onNsdResolved(serviceInfo) }
+                    override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                        onNsdResolved(serviceInfo)
+                    }
                 })
             }
         }

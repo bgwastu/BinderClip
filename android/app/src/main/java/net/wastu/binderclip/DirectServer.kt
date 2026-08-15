@@ -14,6 +14,7 @@ import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
@@ -59,7 +60,23 @@ class DirectServer(
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
     private val writeLock = Any()
-    private val transferScheduler = Executors.newScheduledThreadPool(2)
+    @Volatile
+    private var transferScheduler: ScheduledThreadPoolExecutor? = null
+
+    private fun transferPool(): ScheduledThreadPoolExecutor {
+        var pool = transferScheduler
+        if (pool == null || pool.isShutdown || pool.isTerminated) {
+            synchronized(acceptLock) {
+                pool = transferScheduler
+                if (pool == null || pool.isShutdown || pool.isTerminated) {
+                    pool = ScheduledThreadPoolExecutor(2)
+                    transferScheduler = pool
+                }
+            }
+        }
+        return pool!!
+    }
+
     private val invites = Collections.synchronizedMap(LinkedHashMap<String, Pair<ByteArray, Long>>())
     private val memberSockets = Collections.synchronizedMap(LinkedHashMap<String, Socket>())
     private val memberNames = Collections.synchronizedMap(LinkedHashMap<String, String>())
@@ -78,9 +95,13 @@ class DirectServer(
         var outboundNextIndex = 0
         var outboundAcknowledgedIndex = -1
         var outboundTimeout: ScheduledFuture<*>? = null
+        @Volatile
+        var lastActivity = System.currentTimeMillis()
     }
 
     val isRunning: Boolean get() = running.get()
+
+    private var memberWatchdog: ScheduledFuture<*>? = null
 
     fun start() {
         synchronized(acceptLock) {
@@ -97,6 +118,7 @@ class DirectServer(
             }
         }
         Thread { acceptLoop() }.apply { name = "BinderClip host accept"; isDaemon = true; start() }
+        startMemberWatchdog()
         onStatus("Hosting chain — scanning adds devices")
     }
 
@@ -106,12 +128,45 @@ class DirectServer(
             serverSocket?.close()
             serverSocket = null
         }
+        memberWatchdog?.cancel(true); memberWatchdog = null
         val sockets = synchronized(memberSockets) { memberSockets.values.toList() }
         sockets.forEach { runCatching { it.close() } }
         memberSockets.clear()
         memberNames.clear()
         states.clear()
-        transferScheduler.shutdownNow()
+        runCatching { transferScheduler?.shutdownNow() }
+        transferScheduler = null
+    }
+
+    /** Ping members periodically and drop any that don't respond, so a dead
+     *  route (mesh VPN toggle, network switch) doesn't leave the roster showing
+     *  a stale "connected" member. */
+    private fun startMemberWatchdog() {
+        memberWatchdog?.cancel(true)
+        memberWatchdog = transferPool().scheduleWithFixedDelay({
+            try {
+                val key = store.groupKey ?: return@scheduleWithFixedDelay
+                val now = System.currentTimeMillis()
+                val stale = synchronized(memberSockets) { memberSockets.entries.toList() }.filter { (_, socket) ->
+                    val state = states[socket]
+                    state != null && now - state.lastActivity > 45_000
+                }
+                stale.forEach { (_, socket) ->
+                    Log.w("BinderClip", "Member unresponsive — disconnecting")
+                    runCatching { socket.close() }
+                    cleanup(socket)
+                }
+                // Ping all still-connected members.
+                synchronized(memberSockets) { memberSockets.entries.toList() }.forEach { (_, socket) ->
+                    val output = runCatching { DataOutputStream(socket.getOutputStream()) }.getOrNull()
+                    if (output != null && key.isNotEmpty()) {
+                        write(output, DirectProtocol.seal(JSONObject().put("type", "ping"), key))
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w("BinderClip", "Host watchdog error", error)
+            }
+        }, 15, 15, TimeUnit.SECONDS)
     }
 
     fun createInvite(): String? {
@@ -317,6 +372,7 @@ class DirectServer(
     private fun readLoop(socket: Socket, input: DataInputStream, output: DataOutputStream, key: ByteArray) {
         while (!socket.isClosed) {
             val message = DirectProtocol.open(DirectProtocol.read(input), key)
+            states[socket]?.lastActivity = System.currentTimeMillis()
             when (message.optString("type")) {
                 "hello" -> {
                     val id = message.optString("deviceID")
@@ -505,7 +561,7 @@ class DirectServer(
     private fun scheduleOutboundTimeout(imageId: String, index: Int, key: ByteArray, socket: Socket) {
         val state = states[socket] ?: return
         state.outboundTimeout?.cancel(false)
-        state.outboundTimeout = transferScheduler.schedule({
+        state.outboundTimeout = transferPool().schedule({
             if (state.outboundImage?.id != imageId || state.outboundAcknowledgedIndex + 1 != index) return@schedule
             runCatching { DataOutputStream(socket.getOutputStream()) }.getOrNull()?.let {
                 write(it, DirectProtocol.seal(JSONObject().put("type", "mediaAbort").put("id", imageId), key))

@@ -346,7 +346,7 @@ private fun BinderClipScreen(
             RememberedPeer(
                 DeviceNames.android(
                     context
-                ), "", 39_421, state.localDeviceId, "Android", true
+                ), localIpAddress(context), 39_421, state.localDeviceId, "Android", true
             )
         )
     }.map { device ->
@@ -444,19 +444,16 @@ private fun BinderClipScreen(
             onRefresh()
             refreshScope.launch { kotlinx.coroutines.delay(1200); refreshing = false }
         })
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(insets)
-                .pullRefresh(pullRefreshState, refreshing),
-        ) {
+        Box(modifier = Modifier.fillMaxSize().padding(insets)) {
             PullRefreshIndicator(
                 refreshing = refreshing,
                 state = pullRefreshState,
                 modifier = Modifier.align(Alignment.TopCenter),
             )
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pullRefresh(pullRefreshState, refreshing),
                 contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -930,4 +927,39 @@ private fun PairingCodeDialog(
             }
         },
         confirmButton = { TextButton(onClick = onConnected) { Text("Done") } })
+}
+
+/** The current device's IP as assigned by the OS to the active network, which
+ *  is correct regardless of VLAN, mesh VPN, mobile data, or any subnet. Falls
+ *  back to enumerating non-loopback interfaces only if the system doesn't
+ *  report an active network (e.g., in tests). */
+private fun localIpAddress(context: android.content.Context): String {
+    val active = runCatching {
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val network = cm.activeNetwork ?: return@runCatching ""
+        val links = cm.getLinkProperties(network)?.linkAddresses ?: return@runCatching ""
+        links.asSequence()
+            .map { it.address }
+            .filter { it is java.net.Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress }
+            .map { it.hostAddress }
+            .firstOrNull { !it.isNullOrBlank() }
+    }.getOrDefault("")
+    if (!active.isNullOrBlank()) return active
+
+    // Fallback: enumerate non-loopback IPv4 interfaces.
+    val addresses = runCatching {
+        val result = mutableListOf<String>()
+        java.net.NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { networkInterface ->
+            if (networkInterface.isUp && !networkInterface.isLoopback) {
+                networkInterface.inetAddresses.toList().forEach { address ->
+                    if (address is java.net.Inet4Address && !address.isLoopbackAddress && !address.isLinkLocalAddress) {
+                        val ip = address.hostAddress ?: ""
+                        if (ip.isNotBlank() && !ip.startsWith("127.")) result.add(ip)
+                    }
+                }
+            }
+        }
+        result
+    }.getOrDefault(emptyList())
+    return addresses.firstOrNull() ?: ""
 }

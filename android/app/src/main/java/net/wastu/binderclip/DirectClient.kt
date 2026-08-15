@@ -39,8 +39,11 @@ class DirectClient(
     @Volatile private var outboundImage: ImagePayload? = null
     @Volatile private var outboundNextIndex = 0
     @Volatile private var outboundAcknowledgedIndex = -1
-    private val transferScheduler = Executors.newSingleThreadScheduledExecutor()
+    private val transferScheduler = Executors.newScheduledThreadPool(2)
     @Volatile private var outboundTimeout: ScheduledFuture<*>? = null
+    @Volatile private var watchdogTask: ScheduledFuture<*>? = null
+    @Volatile private var lastReceivedAt = 0L
+    private val recentMessageIds = java.util.Collections.synchronizedList(java.util.LinkedList<String>())
 
     private class IncomingImage(val id: String, val mimeType: String, val bytes: Int, val sha256: String) {
         val data = java.io.ByteArrayOutputStream(bytes)
@@ -112,28 +115,49 @@ class DirectClient(
             store.members.filter { it.platform == "macOS" }.forEach { add(it.host) }
         }.distinct().filter { it.isNotBlank() }
 
-        var connectedSocket: Socket? = null
-        var activeHost: String? = null
-        var lastError: Exception? = null
+        if (candidateHosts.isEmpty()) {
+            onStatus("Waiting for ${primaryPeer.name}")
+            onDisconnected()
+            return
+        }
+
+        // Happy Eyeballs parallel connection racing
+        val winner = java.util.concurrent.atomic.AtomicReference<Pair<Socket, String>?>(null)
+        val latch = java.util.concurrent.CountDownLatch(candidateHosts.size)
+        val racePool = Executors.newFixedThreadPool(candidateHosts.size.coerceAtMost(4))
 
         for (host in candidateHosts) {
-            try {
-                val sock = Socket().apply {
-                    tcpNoDelay = true
-                    keepAlive = true
-                    connect(InetSocketAddress(host, primaryPeer.port), 5_000)
-                    soTimeout = 0
+            racePool.execute {
+                var candidateSocket: Socket? = null
+                try {
+                    val sock = Socket().apply {
+                        tcpNoDelay = true
+                        keepAlive = true
+                        connect(InetSocketAddress(host, primaryPeer.port), 3_500)
+                        soTimeout = 0
+                    }
+                    candidateSocket = sock
+                    if (winner.compareAndSet(null, Pair(sock, host))) {
+                        // Winner secured
+                    } else {
+                        runCatching { sock.close() }
+                    }
+                } catch (e: Exception) {
+                    runCatching { candidateSocket?.close() }
+                } finally {
+                    latch.countDown()
                 }
-                connectedSocket = sock
-                activeHost = host
-                break
-            } catch (error: Exception) {
-                lastError = error
             }
         }
 
-        val sock = connectedSocket
-        if (sock != null && activeHost != null) {
+        try {
+            latch.await(4, TimeUnit.SECONDS)
+        } catch (ignored: InterruptedException) {}
+        racePool.shutdownNow()
+
+        val won = winner.get()
+        if (won != null) {
+            val (sock, activeHost) = won
             if (activeHost != primaryPeer.host) {
                 store.peer = primaryPeer.copy(host = activeHost)
             }
@@ -141,8 +165,8 @@ class DirectClient(
             sendHello()
             onStatus("Connected")
         } else {
-            Log.w("BinderClip", "Reconnect failed across ${candidateHosts.size} routes", lastError)
-            DiagnosticLog.warning("Reconnect failed: ${lastError?.message ?: "route unavailable"}")
+            Log.w("BinderClip", "Reconnect failed across ${candidateHosts.size} routes")
+            DiagnosticLog.warning("Reconnect failed across ${candidateHosts.size} routes")
             onStatus("Waiting for ${primaryPeer.name}")
             onDisconnected()
         }
@@ -153,7 +177,10 @@ class DirectClient(
         val out = output ?: run { fail("Clipboard not sent — device unavailable"); return }
         if (text.isEmpty()) { fail("Clipboard is empty"); return }
         if (text.toByteArray().size > DirectProtocol.MAXIMUM_TEXT_BYTES) { fail("Clipboard text is too large"); return }
-        write(out, DirectProtocol.seal(JSONObject().put("type", "clipboard").put("id", java.util.UUID.randomUUID().toString()).put("origin", store.deviceId).put("timestamp", System.currentTimeMillis()).put("text", text), key))
+        val msgId = java.util.UUID.randomUUID().toString()
+        recentMessageIds.add(msgId)
+        if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+        write(out, DirectProtocol.seal(JSONObject().put("type", "clipboard").put("id", msgId).put("origin", store.deviceId).put("timestamp", System.currentTimeMillis()).put("text", text), key))
         Log.i("BinderClip", "Sent clipboard text")
         DiagnosticLog.info("Sent clipboard text")
     }
@@ -178,20 +205,52 @@ class DirectClient(
 
     fun isConnected(): Boolean = connected.get()
     fun close() {
-        outboundTimeout?.cancel(false); outboundTimeout = null; inboundImage = null; outboundImage = null
+        outboundTimeout?.cancel(false); outboundTimeout = null
+        watchdogTask?.cancel(false); watchdogTask = null
+        inboundImage = null; outboundImage = null
         outboundNextIndex = 0; outboundAcknowledgedIndex = -1
         connected.set(false); runCatching { socket?.close() }; socket = null; output = null
     }
     fun shutdown() { close(); transferScheduler.shutdownNow() }
 
+    private fun startWatchdog() {
+        watchdogTask?.cancel(false)
+        watchdogTask = transferScheduler.scheduleWithFixedDelay({
+            if (connected.get() && lastReceivedAt > 0 && System.currentTimeMillis() - lastReceivedAt > 50_000) {
+                Log.w("BinderClip", "Dead connection detected by watchdog")
+                DiagnosticLog.warning("Connection lost: no response from peer")
+                close()
+                onStatus("Connection lost")
+                onDisconnected()
+            }
+        }, 15, 15, TimeUnit.SECONDS)
+    }
+
     private fun attach(newSocket: Socket, input: DataInputStream, newOutput: DataOutputStream, key: ByteArray) {
         socket = newSocket; output = newOutput; connected.set(true)
+        lastReceivedAt = System.currentTimeMillis()
+        startWatchdog()
         readThread = Thread {
             try {
                 while (!newSocket.isClosed) {
                     val message = DirectProtocol.open(DirectProtocol.read(input), key)
+                    lastReceivedAt = System.currentTimeMillis()
                     when (message.optString("type")) {
-                        "clipboard" -> message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
+                        "clipboard" -> {
+                            val msgId = message.optString("id")
+                            if (msgId.isNotBlank()) {
+                                if (recentMessageIds.contains(msgId)) continue
+                                recentMessageIds.add(msgId)
+                                if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+                            }
+                            message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
+                        }
+                        "ping" -> {
+                            output?.let { write(it, DirectProtocol.seal(JSONObject().put("type", "pong"), key)) }
+                        }
+                        "pong" -> {
+                            // Activity timestamp refreshed
+                        }
                         "hello" -> onPeerIdentity(message.optString("deviceID"), message.optString("name", "Mac"))
                         "roster" -> {
                             val members = decodeMembers(message.optJSONArray("members") ?: JSONArray())

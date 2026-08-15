@@ -44,6 +44,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +55,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -71,6 +73,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -171,10 +175,26 @@ class MainActivity : AppCompatActivity() {
     onDisableAccessibility: () -> Unit, onRemove: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     var selectedDevice by remember { mutableStateOf<RememberedPeer?>(null) }
     var showLogs by remember { mutableStateOf(false) }
     val pairingUrl by AppRuntime.pairingUrl.collectAsState()
     val diagnosticEvents by DiagnosticLog.events.collectAsState()
+    val clipboardManager = remember { context.getSystemService(android.content.ClipboardManager::class.java) }
+    val currentClipboardSnippet = remember(permissionRevision, state.pendingText, state.pendingImage) {
+        runCatching {
+            val clip = clipboardManager?.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                val item = clip.getItemAt(0)
+                if (item.uri != null) "Image ready in clipboard"
+                else if (!item.text.isNullOrBlank()) {
+                    val trimmed = item.text.toString().trim()
+                    val line = trimmed.lines().firstOrNull() ?: trimmed
+                    if (line.length > 32) line.take(30) + "…" else line
+                } else null
+            } else null
+        }.getOrNull()
+    }
     val devices = buildList {
         addAll(state.members)
         state.peer?.let(::add)
@@ -218,7 +238,10 @@ class MainActivity : AppCompatActivity() {
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             item {
-                ChainHeader(status = state.status, onReconnect = onReconnect)
+                ChainHeader(status = state.status, onReconnect = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onReconnect()
+                })
             }
             if (devices.isEmpty()) item { EmptyChain() }
             else items(devices.size, key = { devices[it].deviceId }) { index ->
@@ -226,15 +249,43 @@ class MainActivity : AppCompatActivity() {
                 DeviceRow(device, isCurrentDevice = device.deviceId == state.localDeviceId, onClick = { selectedDevice = device })
             }
             item {
-                if (devices.isEmpty()) FilledTonalButton(onClick = onScan, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                if (devices.isEmpty()) FilledTonalButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onScan()
+                }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Icon(Icons.Outlined.QrCodeScanner, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Scan a code")
-                } else FilledTonalButton(onClick = onRequestInvite, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                } else FilledTonalButton(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onRequestInvite()
+                }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Icon(Icons.Outlined.Add, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Add device")
                 }
             }
-            item { Spacer(Modifier.height(8.dp)) }
+            if (currentClipboardSnippet != null) {
+                item {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Outlined.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Ready: “$currentClipboardSnippet”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            } else {
+                item { Spacer(Modifier.height(8.dp)) }
+            }
             item {
-                Button(onClick = onSend, enabled = devices.any { it.connected && it.deviceId != state.localDeviceId }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Button(onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onSend()
+                }, enabled = devices.any { it.connected && it.deviceId != state.localDeviceId }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Send current clipboard")
                 }
             }

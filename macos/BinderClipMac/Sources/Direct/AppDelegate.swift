@@ -82,6 +82,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             if self?.peers.isEmpty == true {
                 self?.showPairing()
             }
+            // DEBUG: join a chain from debug-join.txt (mirrors the Join Chain paste).
+            let joinURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
+                .appendingPathComponent("debug-join.txt")
+            if let code = try? String(contentsOf: joinURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               !code.isEmpty, code.hasPrefix("binderclip://invite") {
+                try? FileManager.default.removeItem(at: joinURL)
+                self?.transport.joinChain(inviteURL: code)
+            }
         }
         #endif
     }
@@ -138,12 +147,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS"))
         menu.addItem(thisMac)
         for peer in peers {
-            let title = peer.connected ? peer.name : "\(peer.name) · reconnecting"
+            let title = peer.connected ? peer.name : "\(peer.name) (reconnecting)"
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
-            // Dim disconnected/reconnecting peers so connection truth is visible.
+            // Dim disconnected/reconnecting peers so connection truth is visible,
+            // but keep the item enabled so its submenu (details/actions) stays
+            // hoverable and usable.
             if !peer.connected {
-                item.isEnabled = false
                 let attributed = NSMutableAttributedString(string: title)
                 attributed.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: attributed.length))
                 item.attributedTitle = attributed

@@ -45,18 +45,26 @@ android {
     namespace = "net.wastu.binderclip"
     compileSdk = 36
 
+    val gitTagVersion = providers.exec {
+        commandLine("git", "describe", "--tags", "--abbrev=0")
+    }.standardOutput.asText.map { it.trim().removePrefix("v") }.orElse("1.0.0")
+
+    val gitCommitCount = providers.exec {
+        commandLine("git", "rev-list", "--count", "HEAD")
+    }.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }.orElse(1)
+
+    val gitHash = providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.map { it.trim() }.orElse("unknown")
+
     defaultConfig {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = (System.getenv("VERSION_CODE") ?: "11").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "1.0.5"
-
-        val gitHash = providers.exec {
-            commandLine("git", "rev-parse", "--short", "HEAD")
-        }.standardOutput.asText.get().trim()
-        buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
+        versionCode = (System.getenv("VERSION_CODE")?.toIntOrNull()) ?: gitCommitCount.get()
+        versionName = System.getenv("VERSION_NAME") ?: gitTagVersion.get()
+        buildConfigField("String", "GIT_HASH", "\"${gitHash.get()}\"")
     }
 
     signingConfigs {

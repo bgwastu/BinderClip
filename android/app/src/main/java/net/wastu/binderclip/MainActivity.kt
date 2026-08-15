@@ -154,6 +154,10 @@ class MainActivity : AppCompatActivity() {
                             deviceName = name
                         )
                     },
+                    onCreateChain = {
+                        startService(BinderClipService.ACTION_CREATE_CHAIN)
+                    },
+                    onJoinChain = ::scan,
                 )
             }
         }
@@ -316,6 +320,8 @@ private fun BinderClipScreen(
     onDisableAccessibility: () -> Unit,
     onRemove: (String) -> Unit,
     onUpdateDeviceName: (String?, String?) -> Unit,
+    onCreateChain: () -> Unit,
+    onJoinChain: () -> Unit,
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -326,7 +332,7 @@ private fun BinderClipScreen(
     val devices = buildList {
         addAll(state.members)
         state.peer?.let(::add)
-        if (state.peer != null && none { it.deviceId == state.localDeviceId }) add(
+        if ((state.peer != null || state.hosting) && none { it.deviceId == state.localDeviceId }) add(
             RememberedPeer(
                 DeviceNames.android(
                     context
@@ -441,15 +447,29 @@ private fun BinderClipScreen(
                         isCurrentDevice = device.deviceId == state.localDeviceId,
                         onClick = { selectedDevice = device })
                 }
+                if (devices.isNotEmpty()) item { Spacer(Modifier.height(12.dp)) }
             item {
-                if (devices.isEmpty()) FilledTonalButton(onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onScan()
-                }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Icon(
-                        Icons.Outlined.QrCodeScanner,
-                        contentDescription = null
-                    ); Spacer(Modifier.width(10.dp)); Text("Scan a code")
+                if (devices.isEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilledTonalButton(onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onCreateChain()
+                        }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                            Icon(
+                                Icons.Outlined.Add,
+                                contentDescription = null
+                            ); Spacer(Modifier.width(10.dp)); Text("Create New Chain")
+                        }
+                        FilledTonalButton(onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onJoinChain()
+                        }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                            Icon(
+                                Icons.Outlined.QrCodeScanner,
+                                contentDescription = null
+                            ); Spacer(Modifier.width(10.dp)); Text("Join Chain")
+                        }
+                    }
                 } else FilledTonalButton(onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onRequestInvite()
@@ -584,7 +604,7 @@ private fun BinderClipScreen(
                     }) { Text("Rename") }
                     TextButton(onClick = {
                         onRemove(target.deviceId); selectedDevice = null
-                    }) { Text("Remove From Chain") }
+                    }) { Text(if (isCurrentDevice) "Leave Chain" else "Remove From Chain") }
                 }
             },
             dismissButton = { TextButton(onClick = { selectedDevice = null }) { Text("Close") } },
@@ -751,15 +771,7 @@ private fun ChainHeader(status: String, onReconnect: () -> Unit) = Row(
 ) {
     Text("This chain", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            status,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
         if (status.startsWith("Waiting") || status.startsWith("Searching") || status.startsWith("Connection")) {
-            Spacer(Modifier.width(4.dp))
             IconButton(onClick = onReconnect, modifier = Modifier.size(24.dp)) {
                 Icon(
                     Icons.Outlined.Refresh,

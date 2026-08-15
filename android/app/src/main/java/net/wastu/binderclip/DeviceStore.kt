@@ -101,11 +101,33 @@ class DeviceStore(context: Context) {
             }) }
         }.toString()).apply()
 
+    var hosting: Boolean
+        get() = prefs.getBoolean("hosting", false)
+        set(value) = prefs.edit().putBoolean("hosting", value).apply()
+
     fun upsertMembers(incoming: List<RememberedPeer>) {
         val merged = (members.associateBy { it.deviceId } + incoming.associateBy { it.deviceId }).values.take(8)
         members = merged
     }
     fun removeMember(deviceId: String) { members = members.filterNot { it.deviceId == deviceId } }
+
+    /** Start a brand-new chain: fresh group key, empty roster, this device hosts. */
+    fun createNewChain() {
+        val key = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        groupKey = key
+        peer = null
+        members = emptyList()
+        hosting = true
+    }
+
+    /** Leave the current chain. Keeps the stable device identity so the device
+     *  can re-create or re-join a chain without being treated as brand-new. */
+    fun leaveChain() {
+        groupKey = null
+        peer = null
+        members = emptyList()
+        hosting = false
+    }
     var pendingText: String?
         get() = prefs.getString("pending_text", null)
         set(value) = prefs.edit().apply { if (value == null) remove("pending_text") else putString("pending_text", value) }.apply()

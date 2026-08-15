@@ -135,6 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        if peers.isEmpty {
+            let create = NSMenuItem(title: "Create New Chain", action: #selector(createNewChain), keyEquivalent: "n")
+            create.target = self; menu.addItem(create)
+            let join = NSMenuItem(title: "Join Chain…", action: #selector(joinChain), keyEquivalent: "j")
+            join.target = self; menu.addItem(join)
+        }
         let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n"); pair.target = self; menu.addItem(pair)
         let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s"); send.target = self; send.isEnabled = !peers.filter(\.connected).isEmpty; menu.addItem(send)
 
@@ -249,6 +255,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     @objc private func showPairing() {
         peerCountBeforePairing = peers.count
         pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
+    }
+    @objc private func createNewChain() {
+        let alert = NSAlert()
+        alert.messageText = "Create a New Chain?"
+        alert.informativeText = "This rotates the group key, clears the device list, and lets you share a fresh pairing code. Existing devices will no longer be accepted."
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            transport.startNewChain()
+            showPairing()
+        }
+    }
+    @objc private func joinChain() {
+        let alert = NSAlert()
+        alert.messageText = "Join a Chain"
+        alert.informativeText = "Paste a BinderClip pairing code from another device's 'Create New Chain' or 'Add Device' window:"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        input.placeholderString = "binderclip://invite?..."
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Join")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            let code = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !code.isEmpty {
+                transport.joinChain(inviteURL: code)
+            }
+        }
     }
     private func checkPairingCompletion() {
         guard let before = peerCountBeforePairing else { return }
@@ -446,6 +480,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard let id = sender.representedObject as? String else { return }
         let name = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
         guard let name else { return }
+        if id == transport.localDeviceID {
+            let alert = NSAlert()
+            alert.messageText = "Leave This Chain?"
+            alert.informativeText = "You will leave the chain. Recreate a new chain or join another with a pairing code."
+            alert.addButton(withTitle: "Leave"); alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn { transport.leaveChain() }
+            return
+        }
         let alert = NSAlert(); alert.messageText = "Remove \(name) From This Chain?"
         alert.informativeText = "It will no longer receive new BinderClip updates or be accepted into this chain."
         alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")

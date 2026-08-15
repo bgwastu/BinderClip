@@ -118,6 +118,7 @@ class DirectClient(
         val pairedMac =
             RememberedPeer(welcome.optString("name", "Mac"), host, port, welcome.optString("deviceID"), "macOS", true)
         store.groupKey = groupKey; store.peer = pairedMac
+        store.hosting = false
         val members = welcome.optJSONArray("members")?.let(::decodeMembers).orEmpty()
         store.upsertMembers(members + pairedMac)
         onRosterChanged(store.members)
@@ -254,19 +255,33 @@ class DirectClient(
     }
 
     fun removeMember(deviceId: String) {
+        if (deviceId == store.deviceId) {
+            leaveChain()
+            return
+        }
         val key = store.groupKey ?: return;
         val out = output ?: run { onStatus("Connect to remove a device"); return }
         write(out, DirectProtocol.seal(JSONObject().put("type", "rosterRemove").put("id", deviceId), key))
-        if (deviceId == store.deviceId) {
-            store.reset(); close(); onRosterChanged(emptyList()); onStatus("You left the BinderClip chain")
-        } else {
-            store.removeMember(deviceId)
-            if (store.peer?.deviceId == deviceId) {
-                store.peer = null
-            }
-            onRosterChanged(store.members)
-            onStatus("Removed device from chain")
+        store.removeMember(deviceId)
+        if (store.peer?.deviceId == deviceId) {
+            store.peer = null
         }
+        onRosterChanged(store.members)
+        onStatus("Removed device from chain")
+    }
+
+    /** Leave the chain. Best-effort notify the host, then always clear local
+     *  chain state so this works even when offline. Keeps the device identity. */
+    fun leaveChain() {
+        val key = store.groupKey
+        val out = output
+        if (key != null && out != null) {
+            write(out, DirectProtocol.seal(JSONObject().put("type", "rosterRemove").put("id", store.deviceId), key))
+        }
+        close()
+        store.leaveChain()
+        onRosterChanged(emptyList())
+        onStatus("You left the BinderClip chain")
     }
 
     fun renameMember(deviceId: String, newName: String) {
@@ -383,9 +398,13 @@ class DirectClient(
                         "rosterRemove" -> {
                             val id = message.optString("id")
                             if (id == store.deviceId) {
-                                store.reset(); close(); onRosterChanged(emptyList()); onStatus("You left the BinderClip chain")
+                                leaveChain()
                             } else {
-                                store.removeMember(id); onRosterChanged(store.members)
+                                store.removeMember(id)
+                                if (store.peer?.deviceId == id) {
+                                    store.peer = null
+                                }
+                                onRosterChanged(store.members)
                             }
                         }
 

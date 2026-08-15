@@ -41,6 +41,7 @@ data class AppState(
     val automaticClipboardEnabled: Boolean = false,
     val accessibilityEnabled: Boolean = false,
     val localDeviceId: String = "",
+    val hosting: Boolean = false,
 )
 
 object AppRuntime {
@@ -53,6 +54,7 @@ class BinderClipService : Service() {
     companion object {
         const val ACTION_START = "net.wastu.binderclip.START"
         const val ACTION_PAIR = "net.wastu.binderclip.PAIR"
+        const val ACTION_CREATE_CHAIN = "net.wastu.binderclip.CREATE_CHAIN"
         const val ACTION_SEND_CURRENT = "net.wastu.binderclip.SEND_CURRENT"
         const val ACTION_COPY_PENDING = "net.wastu.binderclip.COPY_PENDING"
         const val ACTION_UI_VISIBLE = "net.wastu.binderclip.UI_VISIBLE"
@@ -75,6 +77,7 @@ class BinderClipService : Service() {
 
     private lateinit var store: DeviceStore
     private lateinit var client: DirectClient
+    private lateinit var server: DirectServer
     private lateinit var clipboard: ClipboardManager
     private lateinit var nsdManager: NsdManager
     private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
@@ -137,6 +140,17 @@ class BinderClipService : Service() {
             onInvite = { url -> AppRuntime.pairingUrl.value = url; updateStatus("Pairing code ready") },
             onDisconnected = ::scheduleReconnect,
         )
+        server = DirectServer(
+            store = store,
+            deviceNameProvider = { DeviceNames.android(this) },
+            onText = ::receiveText,
+            onOpenUrl = ::receiveOpenUrl,
+            onImage = ::receiveImage,
+            onTransferStatus = ::updateTransferStatus,
+            onStatus = ::updateStatus,
+            onRosterChanged = { publishState() },
+            onInvite = { url -> AppRuntime.pairingUrl.value = url; updateStatus("Pairing code ready") },
+        )
         clipboard.addPrimaryClipChangedListener {
             if (uiVisible) executor.execute(::sendCurrentClipboard)
         }
@@ -157,7 +171,11 @@ class BinderClipService : Service() {
                 rootAvailable && store.isRootClipboardAutomationEnabled() && RootClipboardBridge.enableBackgroundAccess(
                     this
                 )
-            if (store.peer != null) resetReconnectBackoffAndTrigger("service_create")
+            if (store.hosting && store.groupKey != null) {
+                if (uiVisible) server.start()
+            } else if (store.peer != null) {
+                resetReconnectBackoffAndTrigger("service_create")
+            }
             if (automaticClipboardEnabled) startRootPolling()
             publishState()
         }
@@ -168,9 +186,18 @@ class BinderClipService : Service() {
         when (intent?.action ?: ACTION_START) {
             ACTION_PAIR -> intent?.getStringExtra(EXTRA_URI)?.let { uri ->
                 executor.execute {
+                    // Joining a chain always leaves hosting mode first.
+                    if (store.hosting) {
+                        server.stop()
+                        store.hosting = false
+                        store.members = emptyList()
+                        store.peer = null
+                    }
                     runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
                 }
             }
+
+            ACTION_CREATE_CHAIN -> executor.execute(::createNewChain)
 
             ACTION_SEND_CURRENT -> executor.execute { sendCurrentClipboard(userInitiated = true) }
             ACTION_SEARCH_RECONNECT -> resetReconnectBackoffAndTrigger("user_reconnect")
@@ -181,8 +208,16 @@ class BinderClipService : Service() {
                         is SharedPayload.Image -> sendSharedImage(shared.value)
                         is SharedPayload.Text -> {
                             applyText(shared.value)
-                            if (!client.isConnected()) client.reconnect()
-                            if (!client.isConnected()) reportFailure("Content copied, but no device is connected")
+                            if (store.hosting) {
+                                if (!server.isRunning) reportFailure("Content copied, but hosting is not active")
+                                else {
+                                    lastSentText = shared.value
+                                    lastSendAt = System.currentTimeMillis()
+                                    val trimmed = shared.value.trim()
+                                    if (isWebUrl(trimmed)) server.broadcastOpenUrl(trimmed, targetDeviceId)
+                                    else server.broadcastText(shared.value, targetDeviceId)
+                                }
+                            } else if (!client.isConnected()) client.reconnect()
                             else {
                                 lastSentText = shared.value
                                 lastSendAt = System.currentTimeMillis()
@@ -200,7 +235,13 @@ class BinderClipService : Service() {
                 }
             }
 
-            ACTION_REQUEST_INVITE -> executor.execute { client.requestInvite() }
+            ACTION_REQUEST_INVITE -> executor.execute {
+                if (store.hosting) {
+                    if (server.isRunning) server.createInvite() else reportFailure("Hosting is not active")
+                } else {
+                    client.requestInvite()
+                }
+            }
             ACTION_COPY_PENDING -> {
                 store.pendingText?.let { text ->
                     applyText(text)
@@ -217,7 +258,12 @@ class BinderClipService : Service() {
 
             ACTION_UI_VISIBLE -> {
                 uiVisible = intent?.getBooleanExtra("visible", false) ?: false
-                if (uiVisible && !client.isConnected()) resetReconnectBackoffAndTrigger("ui_visible")
+                if (uiVisible) {
+                    if (store.hosting && store.groupKey != null) executor.execute { server.start() }
+                    if (!client.isConnected() && !store.hosting) resetReconnectBackoffAndTrigger("ui_visible")
+                } else if (store.hosting) {
+                    executor.execute { server.stop() }
+                }
             }
 
             ACTION_TOGGLE_ROOT_AUTOMATION -> executor.execute {
@@ -250,14 +296,28 @@ class BinderClipService : Service() {
             }
 
             ACTION_REMOVE_MEMBER -> intent?.getStringExtra(EXTRA_MEMBER_ID)
-                ?.let { id -> executor.execute { client.removeMember(id) } }
+                ?.let { id ->
+                    executor.execute {
+                        if (id == store.deviceId) {
+                            leaveChain()
+                        } else if (store.hosting) {
+                            server.removeMember(id)
+                        } else {
+                            client.removeMember(id)
+                        }
+                    }
+                }
 
             ACTION_UPDATE_DEVICE_NAME -> {
                 val newName = intent?.getStringExtra(EXTRA_DEVICE_NAME)
                 val targetId = intent?.getStringExtra(EXTRA_MEMBER_ID) ?: store.deviceId
                 if (!newName.isNullOrBlank()) {
                     executor.execute {
-                        client.renameMember(targetId, newName)
+                        if (store.hosting) {
+                            server.renameMember(targetId, newName)
+                        } else {
+                            client.renameMember(targetId, newName)
+                        }
                         publishState()
                     }
                 }
@@ -285,7 +345,31 @@ class BinderClipService : Service() {
         unregisterNetworkCallback()
         AccessibilityClipboardBridge.onClipboard = null
         AccessibilityClipboardBridge.onAvailabilityChanged = null
-        stopRootPolling(); client.shutdown(); executor.shutdownNow(); reconnectExecutor.shutdownNow(); super.onDestroy()
+        stopRootPolling(); server.stop(); client.shutdown(); executor.shutdownNow(); reconnectExecutor.shutdownNow(); super.onDestroy()
+    }
+
+    private fun createNewChain() {
+        server.stop()
+        client.close()
+        store.createNewChain()
+        if (uiVisible) {
+            server.start()
+            server.createInvite()
+        }
+        publishState()
+        updateStatus("Created a new chain — scan to add devices")
+    }
+
+    private fun leaveChain() {
+        if (store.hosting) {
+            server.leaveChain()
+        } else {
+            client.leaveChain()
+        }
+        reconnectAttempts.set(0)
+        scheduledReconnectFuture?.cancel(false)
+        scheduledReconnectFuture = null
+        publishState()
     }
 
     private fun registerNetworkCallback() {
@@ -485,6 +569,11 @@ class BinderClipService : Service() {
     }
 
     private fun sendTextIfFresh(text: String) {
+        if (store.hosting) {
+            if (!server.isRunning) return
+            server.broadcastText(text)
+            return
+        }
         if (!client.isConnected()) return
         if (text.isBlank() || text == suppressClipboard) return
         val now = System.currentTimeMillis()
@@ -493,6 +582,12 @@ class BinderClipService : Service() {
     }
 
     private fun sendImageIfFresh(image: ImagePayload) {
+        if (store.hosting) {
+            if (!server.isRunning) return
+            if (image.sha256 == suppressImageHash) return
+            server.sendImage(image)
+            return
+        }
         if (!client.isConnected()) return
         if (image.sha256 == suppressImageHash) return
         val now = System.currentTimeMillis()
@@ -504,6 +599,16 @@ class BinderClipService : Service() {
         // A share is also a local copy operation. Suppression prevents the
         // clipboard listener/root bridge from turning it into a second send.
         applyImage(image)
+        if (store.hosting) {
+            if (!server.isRunning) {
+                reportFailure("Image copied, but hosting is not active")
+                return
+            }
+            lastSentImageHash = image.sha256
+            lastSendAt = System.currentTimeMillis()
+            server.sendImage(image)
+            return
+        }
         if (!client.isConnected()) client.reconnect()
         if (!client.isConnected()) {
             reportFailure("Image copied, but no device is connected")
@@ -557,6 +662,7 @@ class BinderClipService : Service() {
             automaticClipboardEnabled = automaticClipboardEnabled,
             accessibilityEnabled = AccessibilityClipboardBridge.isEnabled(this),
             localDeviceId = store.deviceId,
+            hosting = store.hosting,
         )
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(
             NOTIFICATION_ID,
@@ -584,6 +690,15 @@ class BinderClipService : Service() {
     }
 
     private fun connectionSummary(): String {
+        if (store.hosting && store.groupKey != null) {
+            val names = store.members.filter { it.deviceId != store.deviceId }.map { it.name }
+            return when (names.size) {
+                0 -> "Hosting chain"
+                1 -> "Hosting · ${names[0]}"
+                2, 3 -> "Hosting · ${names.joinToString(", ")}"
+                else -> "Hosting · ${names.size} Devices"
+            }
+        }
         if (store.peer == null) return "No trusted device"
         if (!client.isConnected()) return "Waiting for ${store.peer?.name ?: "device"}"
         val names = (store.members + listOfNotNull(store.peer))

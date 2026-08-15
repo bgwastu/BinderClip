@@ -80,7 +80,7 @@ final class DirectTransport {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var peers: [String: Peer] = [:]
     private var invites: [UUID: Invite] = [:]
-    private let groupKey: Data
+    private var groupKey: Data
     var localDeviceID: String { localID }
     var localDeviceName: String { localName }
     var localEndpoint: DirectEndpoint { DirectEndpoint(host: Self.localAddresses().first ?? "unknown", port: Self.port) }
@@ -223,6 +223,199 @@ final class DirectTransport {
             self?.pathMonitor?.cancel(); self?.pathMonitor = nil
             self?.connections.values.forEach { $0.cancel() }
             self?.connections.removeAll(); self?.contexts.removeAll(); self?.listener?.cancel(); self?.listener = nil
+        }
+    }
+
+    /// Start a brand-new chain: rotate the group key, clear the roster and any
+    /// live connections, and remain listening so others can join via invite.
+    func startNewChain() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let fresh = DirectCrypto.randomBytes(count: 32)
+            self.groupKey = fresh
+            self.secureStore.set(fresh, account: "group-key")
+            self.peers.removeAll()
+            self.invites.removeAll()
+            self.persistPeers()
+            self.connections.values.forEach { self.close($0) }
+            self.publishPeers()
+            self.transferStatus("Created a new chain")
+            self.log("Created a new chain — group key rotated")
+        }
+    }
+
+    /// Leave the current chain: clear the roster and connections but keep the
+    /// key so a re-join to the same chain stays valid. Use startNewChain() to
+    /// rotate the key.
+    func leaveChain() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.peers.removeAll()
+            self.invites.removeAll()
+            self.persistPeers()
+            self.connections.values.forEach { self.close($0) }
+            self.publishPeers()
+            self.transferStatus("Left the BinderClip chain")
+            self.log("Left the BinderClip chain")
+        }
+    }
+
+    /// Join an existing chain by scanning a pairing code. Clears the local
+    /// roster, adopts the host's group key, and connects as a member.
+    func joinChain(inviteURL: String) {
+        let joinQueue = DispatchQueue(label: "net.wastu.binderclip.join")
+        joinQueue.async { [weak self] in
+            guard let self else { return }
+            self.joinHandshake(url: inviteURL)
+        }
+    }
+
+    private func joinHandshake(url inviteURL: String) {
+        guard let url = URL(string: inviteURL), url.scheme == "binderclip", url.host == "invite" else {
+            transferStatus("Not a valid BinderClip pairing code")
+            return
+        }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let hosts = components.queryItems?.filter { $0.name == "host" }.compactMap(\.value).filter { !$0.isEmpty } ?? []
+        guard let portString = components.queryItems?.first(where: { $0.name == "port" })?.value,
+              let port = UInt16(portString),
+              let rawID = components.queryItems?.first(where: { $0.name == "id" })?.value,
+              let keyString = components.queryItems?.first(where: { $0.name == "key" })?.value,
+              let inviteKey = Data(base64Encoded: keyString.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")) else {
+            transferStatus("Not a valid BinderClip pairing code")
+            return
+        }
+        var failure: Error?
+        for host in hosts {
+            do {
+                try joinHost(host: host, port: port, inviteID: rawID, inviteKey: inviteKey)
+                return
+            } catch {
+                failure = error
+            }
+        }
+        transferStatus(failure.map { "Could not join chain: \($0.localizedDescription)" } ?? "Could not join chain")
+        log("Join chain failed: \(failure.map { "\($0.localizedDescription)" } ?? "unknown")", level: .warning)
+    }
+
+    private func joinHost(host: String, port: UInt16, inviteID: String, inviteKey: Data) throws {
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+        let id = ObjectIdentifier(connection)
+        contexts[id] = Context(); connections[id] = connection
+        let semaphore = DispatchSemaphore(value: 0)
+        var handshakeError: Error?
+        var adoptedKey: Data?
+        var remoteName: String?
+        connection.stateUpdateHandler = { [weak self] state in
+            if case .failed(let error) = state {
+                self?.log("Join connection failed: \(error.localizedDescription)", level: .warning)
+                handshakeError = error
+                semaphore.signal()
+            }
+        }
+        connection.start(queue: queue)
+        let clientNonce = DirectCrypto.randomBytes(count: 16).base64EncodedString()
+        let invite = DirectCrypto.hmac(key: inviteKey, value: "client|\(inviteID)|\(clientNonce)")
+        let invitePayload = try JSONSerialization.data(withJSONObject: [
+            "type": "invite", "id": inviteID, "nonce": clientNonce, "proof": invite,
+        ])
+        guard let inviteFrame = try? FrameCodec.encode(invitePayload) else { throw DirectCryptoError.malformed }
+        connection.send(content: inviteFrame, completion: .contentProcessed { error in
+            if let error { handshakeError = error; semaphore.signal() }
+        })
+
+        // Read frames into a buffer; TCP may coalesce inviteAccepted + welcome.
+        var receiveBuffer = Data()
+        var sessionKey: Data?
+        var frameHandler: ((Data) throws -> Void)?
+
+        func processFrames() throws -> Bool {
+            while true {
+                guard let frame = try FrameCodec.decode(from: &receiveBuffer) else { return false }
+                guard let handler = frameHandler else { throw DirectCryptoError.malformed }
+                try handler(frame)
+                if adoptedKey != nil || handshakeError != nil { return true }
+            }
+        }
+
+        func readMore() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: FrameCodec.maximumPayloadBytes + 4) { [weak self] data, _, _, error in
+                _ = self
+                if let error { handshakeError = error; semaphore.signal(); return }
+                if let data { receiveBuffer.append(data) }
+                do {
+                    if try processFrames() { semaphore.signal() } else { readMore() }
+                } catch {
+                    handshakeError = error
+                    semaphore.signal()
+                }
+            }
+        }
+
+        frameHandler = { [weak self] frame in
+            guard let self else { throw DirectCryptoError.malformed }
+            guard sessionKey == nil else { throw DirectCryptoError.malformed }
+            let accepted = try JSONSerialization.jsonObject(with: frame) as? [String: Any]
+            guard let accepted, accepted["type"] as? String == "inviteAccepted",
+                  let serverNonce = accepted["nonce"] as? String,
+                  let serverProof = accepted["proof"] as? String else { throw DirectCryptoError.malformed }
+            let expected = DirectCrypto.hmac(key: inviteKey, value: "server|\(inviteID)|\(clientNonce)|\(serverNonce)")
+            guard DirectCrypto.constantTimeEqual(serverProof, expected) else { throw DirectCryptoError.authentication }
+            sessionKey = DirectCrypto.pairSessionKey(inviteKey: inviteKey, clientNonce: clientNonce, serverNonce: serverNonce)
+            frameHandler = { [weak self] welcomeFrame in
+                guard let self else { throw DirectCryptoError.malformed }
+                let welcome = try JSONSerialization.jsonObject(with: welcomeFrame) as? [String: Any]
+                guard let welcome else { throw DirectCryptoError.malformed }
+                let opened = try DirectCrypto.open(welcome, key: sessionKey!)
+                guard opened["type"] as? String == "welcome",
+                      let groupKeyString = opened["groupKey"] as? String,
+                      let remoteKey = Data(base64Encoded: groupKeyString),
+                      let membersArray = opened["members"] as? [[String: Any]],
+                      let hostName = opened["name"] as? String,
+                      let hostDeviceID = opened["deviceID"] as? String else { throw DirectCryptoError.malformed }
+                adoptedKey = remoteKey
+                remoteName = hostName
+                self.groupKey = remoteKey
+                self.secureStore.set(remoteKey, account: "group-key")
+                self.peers.removeAll()
+                var roster = [Peer(id: hostDeviceID, name: hostName, endpoint: DirectEndpoint(host: host, port: port), connected: true, platform: "Android")]
+                for member in membersArray {
+                    guard let mid = member["id"] as? String, mid != self.localID, mid != hostDeviceID else { continue }
+                    roster.append(Peer(
+                        id: mid,
+                        name: member["name"] as? String ?? "Device",
+                        endpoint: DirectEndpoint(host: member["host"] as? String ?? host, port: (member["port"] as? Int).map { UInt16($0) } ?? port),
+                        connected: true,
+                        platform: member["platform"] as? String ?? "Android"
+                    ))
+                }
+                self.peers = Dictionary(uniqueKeysWithValues: roster.map { ($0.id, $0) })
+                self.persistPeers()
+                self.publishPeers()
+                self.contexts[ObjectIdentifier(connection)]?.peerID = hostDeviceID
+                self.contexts[ObjectIdentifier(connection)]?.receiveStarted = false
+            }
+        }
+        readMore()
+        semaphore.wait()
+        if let handshakeError { throw handshakeError }
+        guard adoptedKey != nil, let remoteName else { throw DirectCryptoError.malformed }
+        transferStatus("Joined chain with \(remoteName)")
+        log("Joined chain hosted by \(remoteName)")
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.startHeartbeats()
+            let cid = ObjectIdentifier(connection)
+            // Carry over any bytes already buffered during the handshake so the
+            // main read loop doesn't lose frames that arrived with the welcome.
+            if !receiveBuffer.isEmpty {
+                self.contexts[cid]?.buffer.append(receiveBuffer)
+            }
+            if self.contexts[cid]?.receiveStarted == false {
+                self.contexts[cid]?.receiveStarted = true
+                self.receive(connection)
+            }
+            self.sendEncrypted(["type": "hello", "deviceID": self.localID, "name": self.localName, "platform": "macOS"], only: connection)
         }
     }
 
@@ -422,7 +615,29 @@ final class DirectTransport {
             transferStatus("Image transfer cancelled")
         case "rosterRemove":
             guard let target = message["id"] as? String else { throw DirectCryptoError.malformed }
-            removeFromChain(target, requestedBy: connection)
+            if target == localID {
+                leaveChain()
+            } else {
+                removeFromChain(target, requestedBy: connection)
+            }
+        case "roster":
+            guard let members = message["members"] as? [[String: Any]] else { throw DirectCryptoError.malformed }
+            var updated: [String: Peer] = [:]
+            for member in members {
+                guard let mid = member["id"] as? String, mid != localID else { continue }
+                let existing = peers[mid]
+                let peer = Peer(
+                    id: mid,
+                    name: member["name"] as? String ?? existing?.name ?? "Device",
+                    endpoint: DirectEndpoint(host: member["host"] as? String ?? existing?.endpoint.host ?? "unknown", port: (member["port"] as? Int).map { UInt16($0) } ?? existing?.endpoint.port ?? Self.port),
+                    connected: (member["connected"] as? Bool) ?? false,
+                    platform: member["platform"] as? String ?? existing?.platform ?? "Android"
+                )
+                updated[mid] = peer
+            }
+            peers = updated
+            persistPeers()
+            publishPeers()
         case "rename":
             guard let targetID = message["id"] as? String, let newName = message["name"] as? String else { throw DirectCryptoError.malformed }
             let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -552,10 +767,7 @@ final class DirectTransport {
 
     private func removeFromChain(_ peerID: String, requestedBy connection: NWConnection?) {
         guard peerID != localID else {
-            sendEncrypted(["type": "rosterRemove", "id": localID], only: nil)
-            peers.removeAll(); persistPeers(); publishPeers()
-            connections.values.forEach { close($0) }
-            transferStatus("Left the BinderClip chain")
+            leaveChain()
             return
         }
         guard peers.removeValue(forKey: peerID) != nil else { return }

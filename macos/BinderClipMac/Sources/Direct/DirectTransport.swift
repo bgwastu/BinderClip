@@ -875,11 +875,9 @@ final class DirectTransport {
         }
     }
 
-    #if DEBUG
     private static func debugLog(_ message: String) {
         DirectTransportDebug.log(message)
     }
-    #endif
 
     /// Handle an application frame received over the WebRTC DataChannel by
     /// routing it through the same encrypted-message pipeline as TCP. When no

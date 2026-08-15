@@ -1,63 +1,31 @@
-# macOS Development
+# macOS BinderClip
 
-## Persistent debug install
+BinderClip is a direct menu-bar clipboard utility. It listens on TCP port
+`39421`, advertises reachable LAN/mesh-VPN addresses in a short-lived QR code,
+and encrypts pairing plus clipboard payloads end to end. It supports text and
+one still image at a time (PNG, JPEG, WebP, or HEIC, up to 10 MiB and 16 MP).
+Images use the same authenticated connection as text, are chunked with ACKs,
+and are never persisted for retry. It has no relay, account, or Bluetooth fallback,
+and integrates Sparkle 2 for signed auto-updates.
 
-Run this from the repository root whenever you want to test the newest macOS
-code:
+## Debug install
+
+From the repository root:
 
 ```sh
 ./macos/debug-install.sh
 ```
 
-The script builds the debug executable, creates `~/Applications/BinderClip
-Debug.app`, atomically replaces the previous debug bundle, and launches the
-new one. The installed app is separate from any `BinderClip.app` in
-`/Applications`.
+This atomically replaces `~/Applications/BinderClip Debug.app`. Pairing secrets
+live in an owner-only file under `~/Library/Application Support/net.wastu.binderclip`;
+the app does not use Keychain, so local debug builds do not prompt for Keychain access.
 
-Updating the bundle does not remove application data. Pairings and settings
-remain in the normal macOS Application Support and Keychain locations.
-
-To build without launching:
+## Tests and package
 
 ```sh
-./macos/debug-install.sh --no-launch
+swift test --package-path macos/BinderClipMac
+./macos/package-release.sh
 ```
 
-## Production releases and updates
-
-Production releases are built by `.github/workflows/macos-release.yml` when a
-GitHub Release is published. The workflow creates `BinderClip-<version>.dmg`,
-an update ZIP, and a Sparkle `appcast.xml`. BinderClip uses the appcast as a
-signed update manifest and its own transactional installer to download,
-verify, replace, and relaunch the app.
-
-Before publishing the first release, create one Sparkle Ed25519 key pair with
-Sparkle's `generate_keys`. CI installs the pinned BWS CLI and loads both values
-at release time from the BWS `Sparkle` project using only the
-`BWS_ACCESS_TOKEN` GitHub Actions secret. Keep the private key in BWS and never
-commit or print it.
-
-Android releases are built by `.github/workflows/android-release.yml` from the
-same GitHub Release tag. CI loads `ANDROID_KEYSTORE_BASE64`,
-`ANDROID_KEYSTORE_PASSWORD`, and `ANDROID_KEYSTORE_ALIAS` from the BWS
-`Android Signing` project. The key
-password defaults to the keystore password, so no separate
-`ANDROID_KEY_PASSWORD` or `ANDROID_KEY_ALIAS` secret is required. In
-Obtainium, add `https://github.com/bgwastu/BinderClip`; it will find the APK
-attached to each release and use its increasing Android version code.
-
-This workflow intentionally does not notarize or Developer ID sign the app.
-It ad-hoc signs the app and authenticates update archives with the Sparkle
-Ed25519 key. A fresh download may require the existing Gatekeeper exception or
-one right-click Open action. After launch, updates are verified fail-closed,
-installed by a separate helper with rollback, and relaunched automatically.
-This preserves archive authenticity without requiring a paid Developer ID
-certificate, but does not provide Apple identity or notarization guarantees.
-
-The release build is universal for Apple silicon and Intel Macs. Release tags
-must be normal semantic versions, for example `v1.0.0`.
-
-The debug executable is signed ad hoc for local use. For live debugging, run
-the script with `--no-launch`, then start `~/Applications/BinderClip Debug.app`
-from Xcode/LLDB or attach to its process. Diagnostic logs are available from
-`~/Library/Application Support/BinderClip/diagnostics.log`.
+The release script creates an ad-hoc-signed universal app, ZIP, and DMG in
+`dist/`. Supply `VERSION` and `BUILD_NUMBER` to override their defaults.

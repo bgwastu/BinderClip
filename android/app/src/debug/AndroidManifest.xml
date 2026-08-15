@@ -1,15 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application>
-        <receiver
-            android:name=".debug.DebugSmokeReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="net.wastu.clipboard.debug.IMPORT_PAIRING" />
-                <action android:name="net.wastu.clipboard.debug.CLEAR_PAIRING" />
-                <action android:name="net.wastu.clipboard.debug.RESET_PROBE" />
-                <action android:name="net.wastu.clipboard.debug.SET_IMAGE_SYNC" />
-            </intent-filter>
-        </receiver>
-    </application>
+    <application />
 </manifest>

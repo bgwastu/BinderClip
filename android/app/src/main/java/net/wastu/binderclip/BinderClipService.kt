@@ -1,0 +1,327 @@
+package net.wastu.binderclip
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import net.wastu.binderclip.R
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.atomic.AtomicBoolean
+
+data class AppState(
+    val status: String = "Not paired",
+    val peer: RememberedPeer? = null,
+    val pendingText: Boolean = false,
+    val pendingImage: Boolean = false,
+    val transferStatus: String? = null,
+    val members: List<RememberedPeer> = emptyList(),
+    val rootAvailable: Boolean = false,
+    val automaticClipboardEnabled: Boolean = false,
+    val accessibilityEnabled: Boolean = false,
+    val localDeviceId: String = "",
+)
+object AppRuntime {
+    val state = kotlinx.coroutines.flow.MutableStateFlow(AppState())
+    val pairingUrl = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+}
+
+/** The only Android background component: a direct-connection foreground service. */
+class BinderClipService : Service() {
+    companion object {
+        const val ACTION_START = "net.wastu.binderclip.START"
+        const val ACTION_PAIR = "net.wastu.binderclip.PAIR"
+        const val ACTION_SEND_CURRENT = "net.wastu.binderclip.SEND_CURRENT"
+        const val ACTION_COPY_PENDING = "net.wastu.binderclip.COPY_PENDING"
+        const val ACTION_UI_VISIBLE = "net.wastu.binderclip.UI_VISIBLE"
+        const val ACTION_TOGGLE_ROOT_AUTOMATION = "net.wastu.binderclip.TOGGLE_ROOT_AUTOMATION"
+        const val ACTION_REFRESH_CAPABILITIES = "net.wastu.binderclip.REFRESH_CAPABILITIES"
+        const val ACTION_DISABLE_ACCESSIBILITY = "net.wastu.binderclip.DISABLE_ACCESSIBILITY"
+        const val ACTION_REMOVE_MEMBER = "net.wastu.binderclip.REMOVE_MEMBER"
+        const val ACTION_SEND_SHARED = "net.wastu.binderclip.SEND_SHARED"
+        const val ACTION_REQUEST_INVITE = "net.wastu.binderclip.REQUEST_INVITE"
+        const val EXTRA_MEMBER_ID = "member_id"
+        const val EXTRA_URI = "uri"
+        private const val CHANNEL = "binderclip_sync"
+        private const val NOTIFICATION_ID = 101
+    }
+
+    private lateinit var store: DeviceStore
+    private lateinit var client: DirectClient
+    private lateinit var clipboard: ClipboardManager
+    private val executor = Executors.newSingleThreadExecutor()
+    private val reconnectExecutor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val reconnectScheduled = AtomicBoolean(false)
+    @Volatile private var uiVisible = false
+    private var suppressClipboard: String? = null
+    private var suppressImageHash: String? = null
+    private var pendingImage: ImagePayload? = null
+    private var transferStatus: String? = null
+    @Volatile private var rootAvailable = false
+    @Volatile private var automaticClipboardEnabled = false
+    private var rootPoll: ScheduledFuture<*>? = null
+    private var rootFingerprint: String? = null
+    private var lastSentText: String? = null
+    private var lastSentImageHash: String? = null
+    private var lastSendAt = 0L
+
+    override fun onCreate() {
+        super.onCreate(); DiagnosticLog.initialize(this); store = DeviceStore(this); clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager; ImageClipboard.clearStale(this)
+        createChannel(); startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
+        client = DirectClient(
+            store = store,
+            deviceName = DeviceNames.android(this),
+            onText = ::receiveText,
+            onImage = ::receiveImage,
+            onTransferStatus = ::updateTransferStatus,
+            onStatus = ::updateStatus,
+            onFailure = ::reportFailure,
+            onPeerIdentity = { id, name ->
+                store.peer = store.peer?.copy(name = name, deviceId = id)
+                publishState()
+            },
+            onRosterChanged = { publishState() },
+            onInvite = { url -> AppRuntime.pairingUrl.value = url; updateStatus("Pairing code ready") },
+            onDisconnected = ::scheduleReconnect,
+        )
+        clipboard.addPrimaryClipChangedListener {
+            if (uiVisible) executor.execute(::sendCurrentClipboard)
+        }
+        AccessibilityClipboardBridge.onClipboard = { payload -> executor.execute { sendAccessibilityClipboard(payload) } }
+        AccessibilityClipboardBridge.onAvailabilityChanged = { executor.execute(::publishState) }
+        executor.execute {
+            rootAvailable = RootClipboardBridge.isAvailable()
+            automaticClipboardEnabled = rootAvailable && store.isRootClipboardAutomationEnabled() && RootClipboardBridge.enableBackgroundAccess(this)
+            if (store.peer != null) client.reconnect()
+            if (automaticClipboardEnabled) startRootPolling()
+            publishState()
+        }
+        publishState()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action ?: ACTION_START) {
+            ACTION_PAIR -> intent?.getStringExtra(EXTRA_URI)?.let { uri -> executor.execute {
+                runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
+            } }
+            ACTION_SEND_CURRENT -> executor.execute { sendCurrentClipboard(userInitiated = true) }
+            ACTION_SEND_SHARED -> executor.execute {
+                when (val shared = SharedPayloadCache.value.also { SharedPayloadCache.value = null }) {
+                    is SharedPayload.Image -> sendSharedImage(shared.value)
+                    is SharedPayload.Text -> client.sendText(shared.value)
+                    null -> reportFailure("Nothing received from the share sheet")
+                }
+            }
+            ACTION_REQUEST_INVITE -> executor.execute { client.requestInvite() }
+            ACTION_COPY_PENDING -> {
+                store.pendingText?.let { applyText(it); store.pendingText = null }
+                pendingImage?.let { applyImage(it); pendingImage = null }
+                publishState()
+            }
+            ACTION_UI_VISIBLE -> uiVisible = intent?.getBooleanExtra("visible", false) ?: false
+            ACTION_TOGGLE_ROOT_AUTOMATION -> executor.execute {
+                val enabled = intent?.getBooleanExtra("enabled", false) ?: false
+                rootAvailable = RootClipboardBridge.isAvailable()
+                automaticClipboardEnabled = enabled && rootAvailable && RootClipboardBridge.enableBackgroundAccess(this)
+                store.setRootClipboardAutomationEnabled(automaticClipboardEnabled)
+                if (automaticClipboardEnabled) startRootPolling() else {
+                    stopRootPolling()
+                    RootClipboardBridge.revokeBackgroundAccess(this)
+                }
+                updateStatus(if (automaticClipboardEnabled) "Automatic clipboard sync is on" else "Automatic clipboard sync is off")
+                toast(
+                    when {
+                        automaticClipboardEnabled -> "Automatic sync on"
+                        enabled -> "Allow root access, then try again"
+                        else -> "Automatic sync off"
+                    },
+                )
+            }
+            ACTION_REFRESH_CAPABILITIES -> executor.execute {
+                rootAvailable = RootClipboardBridge.isAvailable()
+                if ((!rootAvailable || !RootClipboardBridge.hasBackgroundAccess(this)) && automaticClipboardEnabled) {
+                    automaticClipboardEnabled = false
+                    store.setRootClipboardAutomationEnabled(false)
+                    stopRootPolling()
+                }
+                publishState()
+            }
+            ACTION_REMOVE_MEMBER -> intent?.getStringExtra(EXTRA_MEMBER_ID)?.let { id -> executor.execute { client.removeMember(id) } }
+            ACTION_DISABLE_ACCESSIBILITY -> {
+                val disabled = AccessibilityClipboardBridge.disable()
+                executor.execute {
+                    android.os.Handler(mainLooper).postDelayed({
+                        publishState()
+                        if (!disabled) toast("Turn off Accessibility in Settings")
+                    }, 250)
+                }
+            }
+            ACTION_START -> if (store.peer != null && !client.isConnected()) executor.execute { client.reconnect() }
+        }
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onDestroy() {
+        AccessibilityClipboardBridge.onClipboard = null
+        AccessibilityClipboardBridge.onAvailabilityChanged = null
+        stopRootPolling(); client.shutdown(); executor.shutdownNow(); reconnectExecutor.shutdownNow(); super.onDestroy()
+    }
+
+    private fun startRootPolling() {
+        if (rootPoll != null) return
+        rootFingerprint = null
+        rootPoll = reconnectExecutor.scheduleWithFixedDelay({
+            if (!automaticClipboardEnabled) return@scheduleWithFixedDelay
+            if (!client.isConnected()) return@scheduleWithFixedDelay
+            val clip = RootClipboardBridge.read(this, clipboard) ?: return@scheduleWithFixedDelay
+            if (clip.fingerprint == rootFingerprint) return@scheduleWithFixedDelay
+            rootFingerprint = clip.fingerprint
+            when (clip) {
+                is RootClipboardBridge.Clip.Text -> sendTextIfFresh(clip.value)
+                is RootClipboardBridge.Clip.Image -> sendImageIfFresh(clip.value)
+                is RootClipboardBridge.Clip.UnreadableImage -> Unit
+            }
+        }, 0, 900, TimeUnit.MILLISECONDS)
+    }
+    private fun stopRootPolling() { rootPoll?.cancel(true); rootPoll = null; rootFingerprint = null }
+
+    private fun receiveText(text: String) {
+        store.pendingText = text
+        val applyImmediately = uiVisible || automaticClipboardEnabled
+        if (applyImmediately) { applyText(text); store.pendingText = null }
+        publishState(); updateStatus(if (applyImmediately) "Received text" else "Text ready to copy")
+    }
+    private fun receiveImage(image: ImagePayload) {
+        val applyImmediately = uiVisible || automaticClipboardEnabled
+        if (applyImmediately) applyImage(image) else pendingImage = image
+        publishState(); updateStatus(if (applyImmediately) "Received image" else "Image ready to copy")
+    }
+    private fun sendCurrentClipboard(userInitiated: Boolean = false) {
+        when (val content = ClipboardClassifier.read(this, clipboard)) {
+            is LocalClipboardContent.Text -> sendTextIfFresh(content.value)
+            is LocalClipboardContent.Image -> sendImageIfFresh(content.value)
+            LocalClipboardContent.Unsupported -> if (userInitiated) reportFailure("Copy text or a supported image first")
+        }
+    }
+    private fun sendAccessibilityClipboard(payload: AccessibilityClipboard) {
+        if (rootAvailable || !AccessibilityClipboardBridge.isEnabled(this)) return
+        when (payload) {
+            is AccessibilityClipboard.Text -> sendTextIfFresh(payload.value)
+            is AccessibilityClipboard.Image -> sendImageIfFresh(payload.value)
+        }
+    }
+    private fun sendTextIfFresh(text: String) {
+        if (!client.isConnected()) return
+        if (text.isBlank() || text == suppressClipboard) return
+        val now = System.currentTimeMillis()
+        if (text == lastSentText && now - lastSendAt < 1_500) return
+        lastSentText = text; lastSendAt = now; client.sendText(text)
+    }
+    private fun sendImageIfFresh(image: ImagePayload) {
+        if (!client.isConnected()) return
+        if (image.sha256 == suppressImageHash) return
+        val now = System.currentTimeMillis()
+        if (image.sha256 == lastSentImageHash && now - lastSendAt < 1_500) return
+        lastSentImageHash = image.sha256; lastSendAt = now; client.sendImage(image)
+    }
+    private fun sendSharedImage(image: ImagePayload) {
+        // A share is also a local copy operation. Suppression prevents the
+        // clipboard listener/root bridge from turning it into a second send.
+        applyImage(image)
+        if (!client.isConnected()) client.reconnect()
+        if (!client.isConnected()) {
+            reportFailure("Image copied, but no device is connected")
+            return
+        }
+        lastSentImageHash = image.sha256
+        lastSendAt = System.currentTimeMillis()
+        client.sendImage(image)
+    }
+    private fun applyText(text: String) {
+        suppressClipboard = text
+        clipboard.setPrimaryClip(ClipData.newPlainText("BinderClip", text))
+        android.os.Handler(mainLooper).postDelayed({ if (suppressClipboard == text) suppressClipboard = null }, 1_000)
+    }
+    private fun applyImage(image: ImagePayload) {
+        suppressImageHash = image.sha256
+        ImageClipboard.write(this, clipboard, image)
+        android.os.Handler(mainLooper).postDelayed({ if (suppressImageHash == image.sha256) suppressImageHash = null }, 1_000)
+    }
+    private fun updateStatus(message: String) {
+        Log.i("BinderClip", message)
+        if (!message.startsWith("Sending image") && !message.startsWith("Receiving image")) {
+            if (message.contains("failed", ignoreCase = true) || message.contains("lost", ignoreCase = true)) DiagnosticLog.warning(message)
+            else if (message.startsWith("Connected") || message.startsWith("Paired") || message.startsWith("Received") || message == "Image sent") DiagnosticLog.info(message)
+        }
+        val peer = store.peer
+        AppRuntime.state.value = AppState(
+            status = message,
+            peer = peer,
+            pendingText = store.pendingText != null,
+            pendingImage = pendingImage != null,
+            transferStatus = transferStatus,
+            members = store.members,
+            rootAvailable = rootAvailable,
+            automaticClipboardEnabled = automaticClipboardEnabled,
+            accessibilityEnabled = AccessibilityClipboardBridge.isEnabled(this),
+            localDeviceId = store.deviceId,
+        )
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification(message))
+    }
+    private fun toast(message: String) = android.os.Handler(mainLooper).post {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+    private fun updateTransferStatus(message: String) { transferStatus = message; updateStatus(message) }
+    private fun reportFailure(message: String) {
+        DiagnosticLog.error(message)
+        transferStatus = message
+        updateStatus(message)
+        toast(message)
+    }
+    private fun scheduleReconnect() {
+        if (store.peer == null || !reconnectScheduled.compareAndSet(false, true)) return
+        reconnectExecutor.schedule({
+            reconnectScheduled.set(false)
+            if (!client.isConnected()) executor.execute { client.reconnect() }
+        }, 3, TimeUnit.SECONDS)
+    }
+    private fun publishState() { updateStatus(connectionSummary()) }
+    private fun connectionSummary(): String {
+        if (store.peer == null) return "No trusted device"
+        if (!client.isConnected()) return "Waiting for ${store.peer?.name ?: "device"}"
+        val names = (store.members + listOfNotNull(store.peer))
+            .filter { it.deviceId != store.deviceId && it.connected }
+            .distinctBy { it.deviceId }
+            .map { it.name }
+        return when (names.size) {
+            0 -> "Connected"
+            1 -> "Connected to ${names[0]}"
+            2, 3 -> "Connected to ${names.joinToString(", ")}"
+            else -> "Connected to ${names.size} Devices"
+        }
+    }
+    private fun notification(status: String): android.app.Notification {
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val builder = NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_binder_clip).setContentTitle("BinderClip").setContentText(status).setContentIntent(open).setOngoing(true)
+        if (store.pendingText != null || pendingImage != null) {
+            val copy = PendingIntent.getService(this, 1, Intent(this, BinderClipService::class.java).setAction(ACTION_COPY_PENDING), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            builder.addAction(0, if (pendingImage != null) "Copy image" else "Copy text", copy)
+        }
+        return builder.build()
+    }
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT >= 26) (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel(CHANNEL, "BinderClip sync", NotificationManager.IMPORTANCE_LOW))
+    }
+}

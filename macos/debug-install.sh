@@ -9,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PACKAGE_DIR="$SCRIPT_DIR/BinderClipMac"
 APP_NAME="BinderClip Debug.app"
-BUNDLE_ID="net.wastu.clipboard.debug"
+BUNDLE_ID="net.wastu.binderclip.debug"
 INSTALL_DIR="$HOME/Applications"
 INSTALL_PATH="$INSTALL_DIR/$APP_NAME"
 STAGING_PATH="$INSTALL_DIR/.BinderClip Debug.app.new"
@@ -40,6 +40,17 @@ mkdir -p "$STAGING_PATH/Contents/MacOS" "$STAGING_PATH/Contents/Resources"
 
 cp "$EXECUTABLE" "$STAGING_PATH/Contents/MacOS/BinderClip"
 chmod 755 "$STAGING_PATH/Contents/MacOS/BinderClip"
+
+SPARKLE_FRAMEWORK="$PACKAGE_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+  SPARKLE_FRAMEWORK="$(find "$PACKAGE_DIR/.build" -name "Sparkle.framework" -type d | head -n 1)"
+fi
+if [[ -n "$SPARKLE_FRAMEWORK" && -d "$SPARKLE_FRAMEWORK" ]]; then
+  mkdir -p "$STAGING_PATH/Contents/Frameworks"
+  ditto "$SPARKLE_FRAMEWORK" "$STAGING_PATH/Contents/Frameworks/Sparkle.framework"
+  install_name_tool -add_rpath '@loader_path/../Frameworks' "$STAGING_PATH/Contents/MacOS/BinderClip" 2>/dev/null || true
+fi
+
 cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$STAGING_PATH/Contents/Resources/AppIcon.icns"
 cp "$PACKAGE_DIR/Resources/BinderClipMenuIcon.svg" "$STAGING_PATH/Contents/Resources/BinderClipMenuIcon.svg"
 
@@ -68,10 +79,8 @@ cat > "$STAGING_PATH/Contents/Info.plist" <<PLIST
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
-  <key>NSBluetoothAlwaysUsageDescription</key>
-  <string>BinderClip uses Bluetooth to sync clipboard data with your devices.</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>BinderClip uses your local network to transfer clipboard images.</string>
+  <string>BinderClip uses direct local-network or mesh-VPN connections to transfer clipboard text and images.</string>
 </dict>
 </plist>
 PLIST

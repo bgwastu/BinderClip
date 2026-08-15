@@ -8,7 +8,7 @@ let package = Package(
         .executable(name: "BinderClip", targets: ["BinderClip"])
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0")
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
     ],
     targets: [
         .executableTarget(
@@ -23,7 +23,7 @@ let package = Package(
         .testTarget(
             name: "BinderClipTests",
             dependencies: ["BinderClip"],
-            path: "Tests/BinderClipTests"
+            path: "Tests/Direct"
         )
     ]
 )

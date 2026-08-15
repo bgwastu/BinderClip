@@ -1,18 +1,12 @@
-// App entry point: single-instance guard, smoke-test CLI dispatch, and NSApplication bootstrap.
+// App entry point: single-instance guard and NSApplication bootstrap.
 
 import AppKit
+import Darwin
 import os
 
-if CustomUpdater.runHelperIfRequested(arguments: CommandLine.arguments) {
-    exit(0)
-}
-
-// Ignore SIGPIPE globally so broken TCP sockets return EPIPE errors
-// instead of killing the process. Without this, a peer resetting a
-// connection during image transfer crashes the app.
 signal(SIGPIPE, SIG_IGN)
 
-private let bootstrapLogger = Logger(subsystem: "net.wastu.clipboard", category: "Bootstrap")
+private let bootstrapLogger = Logger(subsystem: "net.wastu.binderclip", category: "Bootstrap")
 
 private func hasAnotherRunningInstance() -> Bool {
     guard let bundleID = Bundle.main.bundleIdentifier else { return false }
@@ -21,12 +15,6 @@ private func hasAnotherRunningInstance() -> Bool {
         .runningApplications(withBundleIdentifier: bundleID)
         .contains { $0.processIdentifier != currentPID }
 }
-
-#if DEBUG
-if let exitCode = SmokeAutomationCLI.runIfRequested(arguments: CommandLine.arguments) {
-    exit(exitCode)
-}
-#endif
 
 if hasAnotherRunningInstance() {
     bootstrapLogger.error("Another BinderClip instance detected; refusing secondary launch")

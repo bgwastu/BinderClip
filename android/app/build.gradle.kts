@@ -17,9 +17,9 @@ fun signingValue(propertyKey: String, envKey: String): String? {
     return value?.trim()?.takeIf { it.isNotEmpty() }
 }
 
-val releaseStoreFile = signingValue("storeFile", "CLIPBOARD_STORE_FILE")
-val releaseStorePassword = signingValue("storePassword", "CLIPBOARD_STORE_PASSWORD")
-val releaseKeyAlias = signingValue("keyAlias", "CLIPBOARD_KEY_ALIAS")
+val releaseStoreFile = signingValue("storeFile", "BINDERCLIP_STORE_FILE")
+val releaseStorePassword = signingValue("storePassword", "BINDERCLIP_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "BINDERCLIP_KEY_ALIAS")
     ?: signingValue("keyAlias", "ANDROID_KEYSTORE_ALIAS")
 val releaseKeyPassword = releaseStorePassword
 
@@ -37,20 +37,21 @@ if (releaseSigningPartiallyConfigured && gradle.startParameter.taskNames.any { i
     throw GradleException(
         "Incomplete Android release signing configuration. " +
         "Provide all values in android/keystore.properties (storeFile, storePassword, keyAlias) " +
-        "or via CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS."
+        "or via BINDERCLIP_STORE_FILE, BINDERCLIP_STORE_PASSWORD, BINDERCLIP_KEY_ALIAS."
     )
 }
 
 android {
-    namespace = "net.wastu.clipboard"
+    namespace = "net.wastu.binderclip"
     compileSdk = 36
 
     defaultConfig {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
-        versionCode = (System.getenv("VERSION_CODE") ?: "8").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "0.0.4"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = (System.getenv("VERSION_CODE") ?: "9").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
 
         val gitHash = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")
@@ -77,9 +78,6 @@ android {
                 "proguard-rules.pro"
             )
 
-            // Bundle native debug symbols (ML Kit .so libs from quickie) into the AAB
-            // so Play Console can symbolicate native crashes/ANRs. Kills the
-            // "you've not uploaded debug symbols" warning. FULL = names + line numbers.
             ndk {
                 debugSymbolLevel = "FULL"
             }
@@ -118,7 +116,7 @@ gradle.taskGraph.whenReady {
         throw GradleException(
             "Android release signing is not configured. " +
             "Create android/keystore.properties (storeFile, storePassword, keyAlias) " +
-                "or set CLIPBOARD_STORE_FILE, CLIPBOARD_STORE_PASSWORD, CLIPBOARD_KEY_ALIAS."
+                "or set BINDERCLIP_STORE_FILE, BINDERCLIP_STORE_PASSWORD, BINDERCLIP_KEY_ALIAS."
         )
     }
 
@@ -131,6 +129,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
 
     implementation("androidx.core:core-ktx:1.15.0")
@@ -138,11 +137,12 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     // Quickie: CameraX + bundled ML Kit QR scanner, no Google Play services required.
     implementation("io.github.g00fy2.quickie:quickie-bundled:1.12.0")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("androidx.activity:activity-ktx:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

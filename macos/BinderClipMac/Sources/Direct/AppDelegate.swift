@@ -21,7 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         updaterDelegate: self,
         userDriverDelegate: nil
     )
-    private var peers: [Peer] = [] { didSet { renderMenu(); updateStatusIcon() } }
+    private var peerCountBeforePairing: Int?
+    private var peers: [Peer] = [] { didSet { renderMenu(); updateStatusIcon(); checkPairingCompletion() } }
     private var status = "Listening" { didSet { renderMenu(); updateStatusIcon() } }
     private var localNetworkPermissionRequired = false { didSet { renderMenu() } }
 
@@ -38,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             self?.notifyIncoming(title: "BinderClip", body: "Received image (\(image.mimeType))")
         }
         transport.onPeersChanged = { [weak self] peers in self?.peers = peers }
-        transport.onLog = { [weak self] message in self?.status = message }
+        transport.onLog = { [weak self] message in self?.status = message; self?.checkPairingCompletion() }
         transport.onTransferStatus = { [weak self] message in self?.status = message }
         transport.onLocalNetworkPermissionRequired = { [weak self] required in
             DispatchQueue.main.async { self?.localNetworkPermissionRequired = required }
@@ -103,14 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         menu.addItem(.separator())
         let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n"); pair.target = self; menu.addItem(pair)
-        if let preview = clipboard.currentPreviewDescription() {
-            let previewItem = NSMenuItem(title: "Ready to Send: \(preview)", action: nil, keyEquivalent: "")
-            previewItem.isEnabled = false
-            menu.addItem(previewItem)
-        }
         let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s"); send.target = self; send.isEnabled = !peers.filter(\.connected).isEmpty; menu.addItem(send)
         let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l"); logs.target = self; menu.addItem(logs)
-        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""); updates.target = self; menu.addItem(updates)
+        let versionString = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let updatesTitle = versionString.map { "Check for Updates…\tv\($0)" } ?? "Check for Updates…"
+        let updates = NSMenuItem(title: updatesTitle, action: #selector(checkForUpdates), keyEquivalent: ""); updates.target = self; menu.addItem(updates)
         menu.addItem(.separator()); menu.addItem(NSMenuItem(title: "Quit BinderClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
     }
@@ -157,7 +155,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         return details
     }
 
-    @objc private func showPairing() { pairing.show { [weak self] in self?.transport.createInvite() } }
+    @objc private func showPairing() {
+        peerCountBeforePairing = peers.count
+        pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
+    }
+    private func checkPairingCompletion() {
+        guard let before = peerCountBeforePairing else { return }
+        let connectedCount = peers.filter(\.connected).count
+        let hadConnected = before
+        if connectedCount > hadConnected {
+            peerCountBeforePairing = nil
+            pairing.closeWithSuccess()
+        }
+    }
     @objc private func sendCurrentClipboard() { clipboard.sendCurrentClipboard() }
     @objc private func showLogs() { logWindow.showWindow(nil) }
     @objc private func removePeer(_ sender: NSMenuItem) {

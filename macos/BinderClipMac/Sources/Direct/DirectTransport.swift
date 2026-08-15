@@ -96,29 +96,44 @@ final class DirectTransport {
     func start() {
         queue.async { [weak self] in
             guard let self, self.listener == nil else { return }
-            do {
-                let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+            self.startListener(includeBonjour: true)
+        }
+    }
+
+    private func startListener(includeBonjour: Bool) {
+        do {
+            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+            if includeBonjour {
                 let txtData = "id=\(self.localID)".data(using: .utf8)
                 listener.service = NWListener.Service(name: self.localName, type: "_binderclip._tcp", domain: nil, txtRecord: txtData)
-                listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
-                listener.stateUpdateHandler = { [weak self] state in
-                    switch state {
-                    case .ready:
-                        self?.onLocalNetworkPermissionRequired?(false)
-                    case .waiting(let error), .failed(let error):
-                        self?.onLocalNetworkPermissionRequired?(Self.isPermissionError(error))
-                        if case .failed = state { self?.log("Listener failed: \(error.localizedDescription)") }
-                    default:
-                        break
+            }
+            listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.onLocalNetworkPermissionRequired?(false)
+                case .waiting(let error), .failed(let error):
+                    self.onLocalNetworkPermissionRequired?(Self.isPermissionError(error))
+                    if case .failed = state {
+                        self.log("Listener failed: \(error.localizedDescription)")
+                        if includeBonjour {
+                            self.log("Retrying listener without Bonjour registration")
+                            self.listener?.cancel()
+                            self.listener = nil
+                            self.startListener(includeBonjour: false)
+                        }
                     }
+                default:
+                    break
                 }
-                self.listener = listener
-                listener.start(queue: self.queue)
-                self.startPathMonitor()
-                self.startHeartbeats()
-                self.log("Listening for direct connections with Bonjour discovery")
-            } catch { self.log("Could not listen: \(error.localizedDescription)") }
-        }
+            }
+            self.listener = listener
+            listener.start(queue: self.queue)
+            self.startPathMonitor()
+            self.startHeartbeats()
+            self.log(includeBonjour ? "Listening for direct connections with Bonjour discovery" : "Listening for direct connections")
+        } catch { self.log("Could not listen: \(error.localizedDescription)") }
     }
 
     private func startPathMonitor() {
@@ -433,16 +448,19 @@ final class DirectTransport {
     private func removeFromChain(_ peerID: String, requestedBy connection: NWConnection?) {
         guard peerID != localID else {
             sendEncrypted(["type": "rosterRemove", "id": localID], only: nil)
-            peers.removeAll(); persistPeers(); publishPeers(); connections.values.forEach { $0.cancel() }
+            peers.removeAll(); persistPeers(); publishPeers()
+            connections.values.forEach { close($0) }
             transferStatus("Left the BinderClip chain")
             return
         }
         guard peers.removeValue(forKey: peerID) != nil else { return }
         persistPeers(); publishPeers()
+        // Broadcast removal to ALL authenticated peers so everyone drops the target.
+        sendEncrypted(["type": "rosterRemove", "id": peerID], only: nil)
+        // Then close the removed peer's connection.
         for candidate in connections.values {
-            let context = contexts[ObjectIdentifier(candidate)]
-            if context?.peerID == peerID {
-                sendEncrypted(["type": "rosterRemove", "id": peerID], only: candidate)
+            if contexts[ObjectIdentifier(candidate)]?.peerID == peerID {
+                close(candidate)
             }
         }
         sendRoster(only: nil)

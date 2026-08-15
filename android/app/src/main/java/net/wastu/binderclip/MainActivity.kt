@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
                     onRequestNotifications = { if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) },
                     onOpenAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                     onRequestBatteryOptimization = ::requestBatteryOptimization,
-                    onOpenAppDetails = ::openAppDetails,
+                    onOpenAppDetails = ::openAutoStartSettings,
                     onRequestInvite = { startService(BinderClipService.ACTION_REQUEST_INVITE) },
                     onSend = { startService(BinderClipService.ACTION_SEND_CURRENT) },
                     onCopy = { startService(BinderClipService.ACTION_COPY_PENDING) },
@@ -151,10 +151,37 @@ class MainActivity : AppCompatActivity() {
     private fun pair(uri: String) { ContextCompat.startForegroundService(this, Intent(this, BinderClipService::class.java).setAction(BinderClipService.ACTION_PAIR).putExtra(BinderClipService.EXTRA_URI, uri)) }
     private fun requestBatteryOptimization() {
         val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-        runCatching { startActivity(request) }.getOrElse { openAppDetails() }
+        runCatching { startActivity(request) }.getOrElse {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
     }
-    private fun openAppDetails() {
+    private fun openAutoStartSettings() {
         getSharedPreferences("binderclip", MODE_PRIVATE).edit().putBoolean("auto_start_help_seen", true).apply()
+        val manufacturer = android.os.Build.MANUFACTURER.lowercase()
+        val candidates = mutableListOf<Intent>()
+        when {
+            manufacturer.contains("xiaomi") || manufacturer.contains("redmi") -> {
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")))
+            }
+            manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme") -> {
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")))
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity")))
+            }
+            manufacturer.contains("vivo") -> {
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")))
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager")))
+            }
+            manufacturer.contains("huawei") || manufacturer.contains("honor") -> {
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")))
+                candidates.add(Intent().setComponent(android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")))
+            }
+        }
+        for (intent in candidates) {
+            if (packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null) {
+                runCatching { startActivity(intent); return }
+            }
+        }
+        // Fallback: standard App Info page
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
     private fun startService(action: String, visible: Boolean? = null, enabled: Boolean? = null, memberId: String? = null) {
@@ -209,7 +236,7 @@ class MainActivity : AppCompatActivity() {
         if (!notificationsGranted) add(PermissionNeed("Notifications", "Show received clipboard", Icons.Outlined.Notifications, onRequestNotifications))
         if (!state.rootAvailable && !state.accessibilityEnabled) add(PermissionNeed("Automatic Sync Clipboard", "Enable Accessibility", Icons.Outlined.AccessibilityNew, onOpenAccessibility))
         if (!batteryOptimizationIgnored) add(PermissionNeed("Battery Optimization", "Allow reliable background sync", Icons.Outlined.BatteryChargingFull, onRequestBatteryOptimization))
-        if (autoStartHelpNeeded) add(PermissionNeed("Auto Start", "Enable it in App Info if available", Icons.Outlined.Settings, onOpenAppDetails, "Open"))
+        if (autoStartHelpNeeded) add(PermissionNeed("Auto Start", "Allow background start for reliable sync", Icons.Outlined.Settings, onOpenAppDetails, "Open"))
     }
     Scaffold(topBar = {
         TopAppBar(

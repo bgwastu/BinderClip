@@ -81,6 +81,10 @@ cat > "$STAGING_PATH/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSLocalNetworkUsageDescription</key>
   <string>BinderClip uses direct local-network or mesh-VPN connections to transfer clipboard text and images.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_binderclip._tcp</string>
+  </array>
 </dict>
 </plist>
 PLIST

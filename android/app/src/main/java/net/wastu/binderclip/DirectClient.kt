@@ -197,6 +197,14 @@ class DirectClient(
     fun removeMember(deviceId: String) {
         val key = store.groupKey ?: return; val out = output ?: run { onStatus("Connect to remove a device"); return }
         write(out, DirectProtocol.seal(JSONObject().put("type", "rosterRemove").put("id", deviceId), key))
+        if (deviceId == store.deviceId) {
+            store.reset(); close(); onRosterChanged(emptyList()); onStatus("You left the BinderClip chain")
+        } else {
+            store.removeMember(deviceId)
+            if (store.peer?.deviceId == deviceId) { store.peer = null }
+            onRosterChanged(store.members)
+            onStatus("Removed device from chain")
+        }
     }
     fun requestInvite() {
         val key = store.groupKey ?: return; val out = output ?: run { onStatus("Connect to add a device"); return }

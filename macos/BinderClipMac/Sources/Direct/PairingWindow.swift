@@ -5,19 +5,33 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var imageView: NSImageView?
     private var countdownLabel: NSTextField?
+    private var statusLabel: NSTextField?
     private var invitationProvider: (() -> URL?)?
     private var expiresAt = Date()
     private var timer: Timer?
 
-    func show(invitationProvider: @escaping () -> URL?) {
+    func show(statusText: String = "Scan with BinderClip", invitationProvider: @escaping () -> URL?) {
         self.invitationProvider = invitationProvider
         if window == nil { buildWindow() }
+        statusLabel?.stringValue = statusText
         refreshInvite()
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         window?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    func closeWithSuccess() {
+        statusLabel?.stringValue = "✓ Device connected!"
+        statusLabel?.textColor = .systemGreen
+        stopTimer()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.window?.close()
+            self?.statusLabel?.textColor = .secondaryLabelColor
+        }
+    }
+
+    var isVisible: Bool { window?.isVisible ?? false }
 
     func windowWillClose(_ notification: Notification) { stopTimer() }
 
@@ -28,6 +42,7 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         let detail = NSTextField(labelWithString: "Scan with BinderClip")
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
+        statusLabel = detail
         let countdown = NSTextField(labelWithString: "5:00")
         countdown.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         countdown.textColor = .secondaryLabelColor
@@ -101,3 +116,4 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         return image
     }
 }
+

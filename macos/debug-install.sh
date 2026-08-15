@@ -72,9 +72,9 @@ cat > "$STAGING_PATH/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.0.0-debug</string>
+  <string>$(git describe --tags --always 2>/dev/null | sed 's/^v//' || echo "0.0.0-debug")</string>
   <key>CFBundleVersion</key>
-  <string>$(date +%s)</string>
+  <string>$(git rev-list --count HEAD 2>/dev/null || date +%s)</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>

@@ -21,7 +21,9 @@ final class LogWindowController: NSWindowController {
         clear.bezelStyle = .rounded
         let copy = NSButton(title: "Copy", target: nil, action: nil)
         copy.bezelStyle = .rounded
-        let controls = NSStackView(views: [clear, copy])
+        let close = NSButton(title: "Close", target: nil, action: nil)
+        close.bezelStyle = .rounded
+        let controls = NSStackView(views: [clear, copy, close])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 8
@@ -45,6 +47,8 @@ final class LogWindowController: NSWindowController {
         clear.action = #selector(clearLogs)
         copy.target = self
         copy.action = #selector(copyLogs)
+        close.target = self
+        close.action = #selector(closeWindow)
         // Never make the transport queue wait for AppKit's main thread. The transport
         // records connection events while launch is still rendering the menu.
         observer = NotificationCenter.default.addObserver(forName: DiagnosticLog.changed, object: DiagnosticLog.shared, queue: nil) { [weak self] _ in
@@ -70,6 +74,7 @@ final class LogWindowController: NSWindowController {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(textView.string, forType: .string)
     }
+    @objc private func closeWindow() { window?.performClose(nil) }
 
     private func refresh() {
         let formatter = DateFormatter()

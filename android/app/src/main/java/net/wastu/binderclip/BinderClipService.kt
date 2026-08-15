@@ -123,6 +123,7 @@ class BinderClipService : Service() {
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         createChannel(); startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
         client = DirectClient(
+            context = this,
             store = store,
             deviceNameProvider = { DeviceNames.android(this) },
             onText = ::receiveText,
@@ -141,6 +142,7 @@ class BinderClipService : Service() {
             onDisconnected = ::scheduleReconnect,
         )
         server = DirectServer(
+            context = this,
             store = store,
             deviceNameProvider = { DeviceNames.android(this) },
             onText = ::receiveText,

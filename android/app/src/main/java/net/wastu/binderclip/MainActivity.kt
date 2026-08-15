@@ -640,7 +640,7 @@ private fun BinderClipScreen(
             dismissButton = { TextButton(onClick = { deviceToRename = null }) { Text("Cancel") } }
         )
     }
-    pairingUrl?.let { url -> PairingCodeDialog(url) { AppRuntime.pairingUrl.value = null } }
+    pairingUrl?.let { url -> PairingCodeDialog(url, state, onConnected = { AppRuntime.pairingUrl.value = null }) }
     if (showLogs) {
         var logQuery by remember { mutableStateOf("") }
         var selectedFilter by remember { mutableStateOf<DiagnosticLevel?>(null) }
@@ -846,7 +846,26 @@ private fun PreferenceToggle(title: String, summary: String, checked: Boolean, o
     trailingContent = { Switch(checked = checked, onCheckedChange = onChanged) })
 
 @Composable
-private fun PairingCodeDialog(url: String, onDismiss: () -> Unit) {
+private fun PairingCodeDialog(
+    url: String,
+    state: AppState,
+    onConnected: () -> Unit,
+) {
+    // Invite TTL is 300 seconds on the host side.
+    val inviteTTL = 300
+    var secondsLeft by remember(url) { mutableIntStateOf(inviteTTL) }
+    LaunchedEffect(url) {
+        secondsLeft = inviteTTL
+        while (secondsLeft > 0) {
+            kotlinx.coroutines.delay(1000)
+            secondsLeft -= 1
+        }
+    }
+    // Auto-close as soon as a new device connects to this chain.
+    val connectedPeers = state.members.count { it.connected && it.deviceId != state.localDeviceId }
+    LaunchedEffect(connectedPeers, url) {
+        if (connectedPeers > 0) onConnected()
+    }
     val image = remember(url) {
         val matrix = com.google.zxing.MultiFormatWriter().encode(url, com.google.zxing.BarcodeFormat.QR_CODE, 640, 640)
         android.graphics.Bitmap.createBitmap(640, 640, android.graphics.Bitmap.Config.ARGB_8888).also { bitmap ->
@@ -858,16 +877,30 @@ private fun PairingCodeDialog(url: String, onDismiss: () -> Unit) {
         }.asImageBitmap()
     }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = onConnected,
         title = { Text("Add a device") },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "Scan this code with BinderClip on the device you want to add. " +
+                        "It works on the same Wi-Fi, a mesh network, or over the internet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
                 Image(
                     image,
                     contentDescription = "BinderClip pairing code",
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                val formatted = "%d:%02d".format(secondsLeft / 60, secondsLeft % 60)
+                Text(
+                    if (secondsLeft == 0) "Code expired — generate a new one" else "Code expires in $formatted",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (secondsLeft == 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+        confirmButton = { TextButton(onClick = onConnected) { Text("Done") } })
 }

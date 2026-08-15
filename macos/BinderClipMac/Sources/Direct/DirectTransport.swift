@@ -51,6 +51,7 @@ final class DirectTransport {
         var outboundTimeout: DispatchWorkItem?
         var receiveStarted = false
         var lastActivity = Date()
+        var webrtc: WebRTCTransport?
     }
     private final class InboundImage {
         let id: UUID; let wireID: String; let mimeType: String; let expectedBytes: Int; let expectedHash: String
@@ -81,6 +82,7 @@ final class DirectTransport {
     private var peers: [String: Peer] = [:]
     private var invites: [UUID: Invite] = [:]
     private var groupKey: Data
+    private let webrtcQueue = DispatchQueue(label: "net.wastu.binderclip.webrtc.upgrade")
     var localDeviceID: String { localID }
     var localDeviceName: String { localName }
     var localEndpoint: DirectEndpoint { DirectEndpoint(host: Self.localAddresses().first ?? "unknown", port: Self.port) }
@@ -455,6 +457,8 @@ final class DirectTransport {
             var operation: [String: Any] = ["type": "clipboard", "id": UUID().uuidString, "origin": self.localID,
                                             "timestamp": UInt64(Date().timeIntervalSince1970 * 1_000), "text": text]
             if let targetDeviceId { operation["targetDeviceId"] = targetDeviceId }
+            // Prefer the WebRTC channel when it is up; it works across networks.
+            if self.webrtcSend(operation) { return }
             for connection in targetConnections {
                 self.sendEncrypted(operation, only: connection)
             }
@@ -480,6 +484,7 @@ final class DirectTransport {
             var operation: [String: Any] = ["type": "openUrl", "id": UUID().uuidString, "origin": self.localID,
                                             "timestamp": UInt64(Date().timeIntervalSince1970 * 1_000), "url": urlString]
             if let targetDeviceId { operation["targetDeviceId"] = targetDeviceId }
+            if self.webrtcSend(operation) { return }
             for connection in targetConnections {
                 self.sendEncrypted(operation, only: connection)
             }
@@ -572,6 +577,9 @@ final class DirectTransport {
                 sendEncrypted(["type": "hello", "deviceID": localID, "name": localName, "platform": "macOS"], only: connection)
                 sendRoster(only: nil)
             }
+            // Invisible WebRTC upgrade: both sides bring up a DataChannel and
+            // exchange identity cards over TCP; sync moves onto it transparently.
+            upgradeToWebRTC(connection: connection)
         case "clipboard":
             guard let text = message["text"] as? String, text.utf8.count <= Self.maximumTextBytes else { throw DirectCryptoError.malformed }
             if let target = message["targetDeviceId"] as? String, !target.isEmpty, target != localID {
@@ -620,6 +628,24 @@ final class DirectTransport {
             } else {
                 removeFromChain(target, requestedBy: connection)
             }
+        case "webrtcCard":
+            guard let card = message["card"] as? String else { throw DirectCryptoError.malformed }
+            #if DEBUG
+            Self.debugLog("TCP received webrtcCard, len=\(card.count)")
+            #endif
+            handleWebRTCCard(card, connection: connection)
+        case "webrtcOffer":
+            guard let sdp = message["sdp"] as? String, let webrtc = context.webrtc else { throw DirectCryptoError.malformed }
+            #if DEBUG
+            Self.debugLog("TCP received webrtcOffer, len=\(sdp.count)")
+            #endif
+            webrtc.processRemoteOffer(sdp)
+        case "webrtcAnswer":
+            guard let sdp = message["sdp"] as? String, let webrtc = context.webrtc else { throw DirectCryptoError.malformed }
+            #if DEBUG
+            Self.debugLog("TCP received webrtcAnswer, len=\(sdp.count)")
+            #endif
+            webrtc.processRemoteAnswer(sdp)
         case "roster":
             guard let members = message["members"] as? [[String: Any]] else { throw DirectCryptoError.malformed }
             var updated: [String: Peer] = [:]
@@ -793,6 +819,219 @@ final class DirectTransport {
 
     private func sendRoster(only connection: NWConnection?) {
         sendEncrypted(["type": "roster", "members": rosterPayload()], only: connection)
+    }
+
+    // MARK: - WebRTC invisible upgrade
+
+    /// Start an invisible WebRTC upgrade session for one TCP peer and, once ICE
+    /// gathering completes, send our identity card over the existing TCP control
+    /// channel. The peer does the same; whichever arrives first wins the offerer
+    /// role deterministically.
+    func upgradeToWebRTC(connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        webrtcQueue.async { [weak self] in
+            guard let self else { return }
+            guard let context = self.contexts[id] else { return }
+            if context.webrtc != nil { return }
+            let transport = WebRTCTransport()
+            context.webrtc = transport
+            // Decide role: the side with the smaller device ID sends the offer;
+            // the other side waits for an offer and answers.
+            let peerID = context.peerID ?? ""
+            let amOfferer = localID.compare(peerID, options: [.caseInsensitive]) == .orderedAscending
+            transport.onEvent = { [weak self] event in
+                self?.handle(webrtcEvent: event, transport: transport)
+            }
+            transport.onLocalOffer = { [weak self] sdp in
+                guard let self, amOfferer else { return }
+                self.sendEncrypted(["type": "webrtcOffer", "sdp": sdp], only: connection)
+            }
+            transport.onAnswerReady = { [weak self] sdp in
+                self?.sendEncrypted(["type": "webrtcAnswer", "sdp": sdp], only: connection)
+            }
+            transport.onFrame = { [weak self] frame in
+                self?.handleWebRTCFrame(frame, connection: connection)
+            }
+            transport.onDataChannelOpen = { [weak self] in
+                guard let self else { return }
+                self.sendEncrypted(["type": "hello", "deviceID": self.localID, "name": self.localName, "platform": "macOS"], only: connection)
+            }
+            transport.beginSDPSession(createOffer: amOfferer)
+        }
+    }
+
+    /// Handle a received `webrtcCard` from the peer: feed it to the WebRTC
+    /// session for that peer so the QR tango completes.
+    private func handleWebRTCCard(_ cardBase64: String, connection: NWConnection) {
+        webrtcQueue.async { [weak self] in
+            guard let self, let data = Data(base64Encoded: cardBase64) else { return }
+            guard let session = self.contexts[ObjectIdentifier(connection)]?.webrtc else { return }
+            #if DEBUG
+            if let remote = try? WebRTCQRCodec.decode(data) {
+                Self.debugLog("handleWebRTCCard decoded: ufrag=\(remote.ufrag) pwdLen=\(remote.pwd.count) cands=\(remote.candidates.count)")
+            }
+            #endif
+            session.processScannedPayload(data)
+        }
+    }
+
+    #if DEBUG
+    private static func debugLog(_ message: String) {
+        DirectTransportDebug.log(message)
+    }
+    #endif
+
+    /// Handle an application frame received over the WebRTC DataChannel by
+    /// routing it through the same encrypted-message pipeline as TCP. When no
+    /// TCP connection backs the session (pure WebRTC pairing), a scratch
+    /// context is used.
+    private func handleWebRTCFrame(_ frame: Data, connection: NWConnection?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
+                self.log("Rejected WebRTC frame (not JSON)", level: .error)
+                return
+            }
+            guard let message = try? DirectCrypto.open(object, key: self.groupKey) else {
+                self.log("Rejected WebRTC frame (bad crypto)", level: .error)
+                return
+            }
+            // Route through the same per-peer message handling as TCP so media,
+            // roster, rename, etc. all work identically over the DataChannel.
+            let context: Context
+            if let connection {
+                guard let existing = self.contexts[ObjectIdentifier(connection)] else { return }
+                context = existing
+            } else {
+                context = Context()
+            }
+            do {
+                try self.handleDecryptedWebRTCMessage(message, context: context, connection: connection)
+            } catch {
+                self.log("Rejected WebRTC frame: \(error)", level: .error)
+            }
+        }
+    }
+
+    private func handleDecryptedWebRTCMessage(_ message: [String: Any], context: Context, connection: NWConnection?) throws {
+        switch message["type"] as? String {
+        case "clipboard":
+            if let text = message["text"] as? String, text.utf8.count <= Self.maximumTextBytes {
+                Self.debugLog("Received clipboard text over WebRTC: \(String(text.prefix(40)))")
+                self.log("Received clipboard text over WebRTC")
+                self.onClipboard?(text)
+            }
+        case "openUrl":
+            if let urlString = message["url"] as? String, let url = URL(string: urlString),
+               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                Self.debugLog("Received URL over WebRTC: \(urlString)")
+                self.log("Received URL over WebRTC")
+                self.onOpenURL?(url)
+            }
+        case "hello":
+            if let id = message["deviceID"] as? String {
+                self.peers[id] = Peer(id: id, name: message["name"] as? String ?? "Device",
+                                      endpoint: DirectEndpoint(host: "webrtc", port: Self.port),
+                                      connected: true, platform: message["platform"] as? String ?? "Android")
+                self.persistPeers(); self.publishPeers()
+                self.webrtcSend(["type": "hello", "deviceID": self.localID, "name": self.localName, "platform": "macOS"])
+            }
+        case "ping":
+            self.webrtcSend(["type": "pong"])
+        // Media messages reuse the same per-peer window/ACK logic as TCP.
+        case "mediaOffer", "mediaAccept", "mediaChunk", "mediaAck", "mediaComplete":
+            guard let connection else { break }
+            switch message["type"] as? String {
+            case "mediaOffer": try handleMediaOffer(message, connection: connection, context: context)
+            case "mediaAccept": try handleMediaAccept(message, connection: connection, context: context)
+            case "mediaChunk": try handleMediaChunk(message, connection: connection, context: context)
+            case "mediaAck": try handleMediaAck(message, connection: connection, context: context)
+            case "mediaComplete": try handleMediaComplete(message, connection: connection, context: context)
+            default: break
+            }
+        case "mediaReject":
+            context.outboundTimeout?.cancel(); context.outboundTimeout = nil; context.outboundImage = nil
+            transferStatus("Image rejected by peer")
+        case "mediaAbort":
+            context.outboundTimeout?.cancel(); context.outboundTimeout = nil; context.inboundImage = nil; context.outboundImage = nil
+            transferStatus("Image transfer cancelled")
+        case "roster":
+            guard let members = message["members"] as? [[String: Any]] else { throw DirectCryptoError.malformed }
+            var updated: [String: Peer] = [:]
+            for member in members {
+                guard let mid = member["id"] as? String, mid != localID else { continue }
+                let existing = peers[mid]
+                updated[mid] = Peer(
+                    id: mid,
+                    name: member["name"] as? String ?? existing?.name ?? "Device",
+                    endpoint: DirectEndpoint(host: member["host"] as? String ?? existing?.endpoint.host ?? "unknown", port: (member["port"] as? Int).map { UInt16($0) } ?? existing?.endpoint.port ?? Self.port),
+                    connected: (member["connected"] as? Bool) ?? false,
+                    platform: member["platform"] as? String ?? existing?.platform ?? "Android"
+                )
+            }
+            peers = updated
+            persistPeers(); publishPeers()
+        case "rosterRemove":
+            guard let target = message["id"] as? String else { throw DirectCryptoError.malformed }
+            if target == localID {
+                leaveChain()
+            } else {
+                removeFromChain(target, requestedBy: connection)
+            }
+        case "rename":
+            guard let targetID = message["id"] as? String, let newName = message["name"] as? String else { throw DirectCryptoError.malformed }
+            let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw DirectCryptoError.malformed }
+            if targetID == localID {
+                localName = trimmed
+                UserDefaults.standard.set(trimmed, forKey: "device.custom_name")
+                publishPeers()
+            } else if var peer = peers[targetID] {
+                peer.name = trimmed
+                peers[targetID] = peer
+                persistPeers(); publishPeers()
+            }
+            sendRoster(only: nil)
+        default:
+            break
+        }
+    }
+
+    private func handle(webrtcEvent: WebRTCTransportEvent, transport: WebRTCTransport) {
+        switch webrtcEvent {
+        case .connected:
+            log("Connected over WebRTC")
+            transferStatus("Connected")
+        case .disconnected(let message):
+            log("WebRTC disconnected: \(message)")
+        case .connecting(let message):
+            log("WebRTC connecting: \(message)")
+        case .transferStatus(let message):
+            transferStatus(message)
+        case .log(let message):
+            log(message)
+        case .receivedText, .receivedOpenURL, .receivedImage, .receivedRoster:
+            break
+        }
+    }
+
+    /// Send an encrypted frame over WebRTC to any open session; returns true if
+    /// at least one delivered. The caller falls back to TCP otherwise.
+    @discardableResult
+    private func webrtcSend(_ object: [String: Any]) -> Bool {
+        guard let sealed = try? DirectCrypto.seal(object, key: groupKey),
+              let body = try? JSONSerialization.data(withJSONObject: sealed, options: [.sortedKeys]),
+              let frame = try? FrameCodec.encode(body) else { return false }
+        var delivered = false
+        webrtcQueue.sync {
+            for context in contexts.values {
+                if let webrtc = context.webrtc, webrtc.isOpen {
+                    webrtc.send(frame)
+                    delivered = true
+                }
+            }
+        }
+        return delivered
     }
 
     private func send(_ object: [String: Any], to connection: NWConnection) {

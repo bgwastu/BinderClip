@@ -1,6 +1,7 @@
 package net.wastu.binderclip
 
 import android.util.Log
+import android.content.Context
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.Inet4Address
@@ -25,6 +26,7 @@ import org.json.JSONObject
  * "join" a chain hosted here. Runs only while the app is in the foreground.
  */
 class DirectServer(
+    private val context: Context,
     private val store: DeviceStore,
     private val deviceNameProvider: () -> String,
     private val onText: (String) -> Unit,
@@ -39,6 +41,20 @@ class DirectServer(
         const val PORT = 39_421
         private const val MAX_IN_FLIGHT_IMAGE_CHUNKS = 4
         private const val INVITE_TTL_MS = 300_000L
+
+        /** Pure per-space port derivation (testable). */
+        fun portForUserId(base: Int, userId: Int): Int = (base + userId).coerceAtMost(65_535)
+
+        /**
+         * Per-space port so multiple Android spaces (users / work profile /
+         * app clones) can each host a chain on the same device without an
+         * EADDRINUSE conflict. User 0 keeps the canonical 39421; each extra
+         * user gets a distinct port derived from its userId.
+         */
+        fun portForSpace(): Int {
+            val userId = android.os.Process.myUid() / 100000
+            return portForUserId(PORT, userId)
+        }
     }
 
     private val acceptLock = Any()
@@ -64,6 +80,8 @@ class DirectServer(
         var outboundNextIndex = 0
         var outboundAcknowledgedIndex = -1
         var outboundTimeout: ScheduledFuture<*>? = null
+        @Volatile
+        var webrtc: WebRTCUpgrade? = null
     }
 
     val isRunning: Boolean get() = running.get()
@@ -72,7 +90,7 @@ class DirectServer(
         synchronized(acceptLock) {
             if (running.get()) return
             runCatching {
-                val server = ServerSocket(PORT).apply { reuseAddress = true }
+                val server = ServerSocket(portForSpace()).apply { reuseAddress = true }
                 serverSocket = server
                 running.set(true)
             }.onFailure {
@@ -110,7 +128,7 @@ class DirectServer(
         val id = UUID.randomUUID().toString()
         invites[id] = key to (System.currentTimeMillis() + INVITE_TTL_MS)
         val hostQuery = hosts.take(4).joinToString("&") { "host=${android.net.Uri.encode(it)}" }
-        val url = "binderclip://invite?$hostQuery&port=$PORT&id=$id&key=${Base64.getUrlEncoder().encodeToString(key)}"
+        val url = "binderclip://invite?$hostQuery&port=${portForSpace()}&id=$id&key=${Base64.getUrlEncoder().encodeToString(key)}"
         onInvite(url)
         return url
     }
@@ -124,7 +142,7 @@ class DirectServer(
             .put("timestamp", System.currentTimeMillis())
             .put("text", text)
         if (!targetDeviceId.isNullOrBlank()) json.put("targetDeviceId", targetDeviceId)
-        sendToMembers(key, json, targetDeviceId)
+        sendToMembers(key, json, targetDeviceId, preferWebRTC = true)
     }
 
     fun broadcastOpenUrl(url: String, targetDeviceId: String? = null) {
@@ -136,7 +154,7 @@ class DirectServer(
             .put("timestamp", System.currentTimeMillis())
             .put("url", url)
         if (!targetDeviceId.isNullOrBlank()) json.put("targetDeviceId", targetDeviceId)
-        sendToMembers(key, json, targetDeviceId)
+        sendToMembers(key, json, targetDeviceId, preferWebRTC = true)
     }
 
     fun sendImage(image: ImagePayload) {
@@ -231,13 +249,18 @@ class DirectServer(
         }
     }
 
-    private fun sendToMembers(key: ByteArray, json: JSONObject, targetDeviceId: String? = null) {
+    private fun sendToMembers(key: ByteArray, json: JSONObject, targetDeviceId: String? = null, preferWebRTC: Boolean = false) {
         synchronized(writeLock) {
             val targets = synchronized(memberSockets) { memberSockets.entries.toList() }.filter { (id, _) ->
                 targetDeviceId == null || targetDeviceId == id
             }
             val sealed = DirectProtocol.seal(json, key)
-            targets.forEach { (_, socket) ->
+            val framed = DirectFrameCodec.encode(sealed.toString().toByteArray())
+            targets.forEach { (id, socket) ->
+                if (preferWebRTC) {
+                    val state = states[socket]
+                    if (state?.webrtc?.sendFrame(framed) == true) return@forEach
+                }
                 runCatching { DataOutputStream(socket.getOutputStream()) }.getOrNull()?.let { out -> write(out, sealed) }
             }
         }
@@ -303,84 +326,7 @@ class DirectServer(
     private fun readLoop(socket: Socket, input: DataInputStream, output: DataOutputStream, key: ByteArray) {
         while (!socket.isClosed) {
             val message = DirectProtocol.open(DirectProtocol.read(input), key)
-            when (message.optString("type")) {
-                "hello" -> {
-                    val id = message.optString("deviceID")
-                    val name = message.optString("name", "Device")
-                    val platform = message.optString("platform", "Android")
-                    if (id.isNotBlank()) {
-                        memberSockets[id] = socket
-                        memberNames[id] = name
-                        val host = runCatching { socket.inetAddress?.hostAddress ?: "" }.getOrDefault("")
-                        store.upsertMembers(listOf(RememberedPeer(name, host, PORT, id, platform, true)))
-                        onRosterChanged(store.members)
-                        broadcastRoster()
-                        onStatus("Connected to ${store.members.size} device${if (store.members.size == 1) "" else "s"}")
-                    }
-                }
-
-                "clipboard" -> {
-                    val target = message.optString("targetDeviceId")
-                    if (target.isNotBlank() && target != store.deviceId) continue
-                    message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
-                }
-
-                "openUrl" -> {
-                    val target = message.optString("targetDeviceId")
-                    if (target.isNotBlank() && target != store.deviceId) continue
-                    message.optString("url").takeIf { it.isNotEmpty() }?.let(onOpenUrl)
-                }
-
-                "ping" -> {
-                    write(output, DirectProtocol.seal(JSONObject().put("type", "pong"), key))
-                }
-
-                "pong" -> Unit
-
-                "rename" -> {
-                    val id = message.optString("id")
-                    val newName = message.optString("name").trim()
-                    if (id.isNotBlank() && newName.isNotBlank()) {
-                        memberNames[id] = newName
-                        store.members = store.members.map {
-                            if (it.deviceId == id) it.copy(name = newName) else it
-                        }
-                        onRosterChanged(store.members)
-                        broadcastRoster()
-                    }
-                }
-
-                "rosterRemove" -> {
-                    val id = message.optString("id")
-                    if (id.isNotBlank() && id != store.deviceId) removeMember(id)
-                }
-
-                "inviteRequest" -> createInvite()
-
-                "mediaOffer" -> handleInboundOffer(message, key, socket)
-                "mediaAccept" -> handleOutboundAccept(message, key, socket)
-                "mediaChunk" -> handleInboundChunk(message, key, socket)
-                "mediaAck" -> handleOutboundAck(message, key, socket)
-                "mediaComplete" -> handleInboundComplete(message, socket)
-                "mediaReject" -> {
-                    states[socket]?.let { state ->
-                        state.outboundTimeout?.cancel(false)
-                        state.outboundTimeout = null
-                        state.outboundImage = null
-                    }
-                    onTransferStatus("Image rejected by device")
-                }
-
-                "mediaAbort" -> {
-                    states[socket]?.let { state ->
-                        state.outboundTimeout?.cancel(false)
-                        state.outboundTimeout = null
-                        state.inboundImage = null
-                        state.outboundImage = null
-                    }
-                    onTransferStatus("Image transfer cancelled")
-                }
-            }
+            handleHostMessage(socket, message, key)
         }
     }
 
@@ -502,7 +448,10 @@ class DirectServer(
     }
 
     private fun cleanup(socket: Socket) {
-        states.remove(socket)
+        states.remove(socket)?.let { state ->
+            state.outboundTimeout?.cancel(false)
+            state.webrtc?.close()
+        }
         val removedIds = synchronized(memberSockets) {
             val ids = memberSockets.filterValues { it === socket }.keys.toList()
             ids.forEach { id ->
@@ -517,6 +466,103 @@ class DirectServer(
             broadcastRoster()
         }
         runCatching { socket.close() }
+    }
+
+    private fun startWebRTCUpgrade(socket: Socket, key: ByteArray) {
+        val state = states[socket] ?: return
+        if (state.webrtc != null) return
+        val output = runCatching { DataOutputStream(socket.getOutputStream()) }.getOrNull() ?: return
+        val upgrade = WebRTCUpgrade(
+            context = context,
+            seal = { json -> DirectProtocol.seal(json, key) },
+            sendControl = { json -> write(output, json) },
+            onFrame = { frame -> handleWebRTCFrame(socket, frame, key) },
+        )
+        // Offerer = smaller device ID. Host answers by default.
+        val memberId = memberSockets.entries.firstOrNull { it.value === socket }?.key ?: ""
+        upgrade.amOfferer = store.deviceId.compareTo(memberId, ignoreCase = true) < 0
+        state.webrtc = upgrade
+        upgrade.start()
+    }
+
+    /** Route a frame received over WebRTC through the same encrypted-message pipeline as TCP. */
+    private fun handleWebRTCFrame(socket: Socket, frame: ByteArray, key: ByteArray) {
+        try {
+            val message = DirectProtocol.open(JSONObject(String(frame, Charsets.UTF_8)), key)
+            handleHostMessage(socket, message, key)
+        } catch (error: Exception) {
+            Log.w("BinderClip", "Rejected WebRTC frame", error)
+        }
+    }
+
+    /** Shared host message handler used by both TCP and WebRTC paths. */
+    private fun handleHostMessage(socket: Socket, message: JSONObject, key: ByteArray) {
+        when (message.optString("type")) {
+            "clipboard" -> {
+                val target = message.optString("targetDeviceId")
+                if (target.isNotBlank() && target != store.deviceId) return
+                message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
+            }
+            "openUrl" -> {
+                val target = message.optString("targetDeviceId")
+                if (target.isNotBlank() && target != store.deviceId) return
+                message.optString("url").takeIf { it.isNotEmpty() }?.let(onOpenUrl)
+            }
+            "ping" -> {
+                val output = runCatching { DataOutputStream(socket.getOutputStream()) }.getOrNull()
+                output?.let { write(it, DirectProtocol.seal(JSONObject().put("type", "pong"), key)) }
+            }
+            "pong" -> Unit
+            "rename" -> {
+                val id = message.optString("id")
+                val newName = message.optString("name").trim()
+                if (id.isNotBlank() && newName.isNotBlank()) {
+                    memberNames[id] = newName
+                    store.members = store.members.map { if (it.deviceId == id) it.copy(name = newName) else it }
+                    onRosterChanged(store.members)
+                    broadcastRoster()
+                }
+            }
+            "rosterRemove" -> {
+                val id = message.optString("id")
+                if (id.isNotBlank() && id != store.deviceId) removeMember(id)
+            }
+            "inviteRequest" -> createInvite()
+            "webrtcCard" -> {
+                val state = states[socket]
+                message.optString("card").takeIf { it.isNotBlank() }?.let { state?.webrtc?.processCard(it) }
+            }
+            "webrtcOffer" -> {
+                val state = states[socket]
+                message.optString("sdp").takeIf { it.isNotBlank() }?.let { state?.webrtc?.processOffer(it) }
+            }
+            "webrtcAnswer" -> {
+                val state = states[socket]
+                message.optString("sdp").takeIf { it.isNotBlank() }?.let { state?.webrtc?.processAnswer(it) }
+            }
+            "mediaOffer" -> handleInboundOffer(message, key, socket)
+            "mediaAccept" -> handleOutboundAccept(message, key, socket)
+            "mediaChunk" -> handleInboundChunk(message, key, socket)
+            "mediaAck" -> handleOutboundAck(message, key, socket)
+            "mediaComplete" -> handleInboundComplete(message, socket)
+            "mediaReject" -> {
+                states[socket]?.let { state ->
+                    state.outboundTimeout?.cancel(false)
+                    state.outboundTimeout = null
+                    state.outboundImage = null
+                }
+                onTransferStatus("Image rejected by device")
+            }
+            "mediaAbort" -> {
+                states[socket]?.let { state ->
+                    state.outboundTimeout?.cancel(false)
+                    state.outboundTimeout = null
+                    state.inboundImage = null
+                    state.outboundImage = null
+                }
+                onTransferStatus("Image transfer cancelled")
+            }
+        }
     }
 
     private fun broadcastRoster() {
@@ -546,7 +592,7 @@ class DirectServer(
                     .put("id", id)
                     .put("name", memberNames[id] ?: "Device")
                     .put("host", runCatching { memberSockets[id]?.inetAddress?.hostAddress ?: "" }.getOrDefault(""))
-                    .put("port", PORT)
+                .put("port", portForSpace())
                     .put("platform", "Android")
                     .put("connected", true)
             )

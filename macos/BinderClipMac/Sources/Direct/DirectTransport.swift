@@ -351,7 +351,8 @@ final class DirectTransport {
         }
         inbound.data.append(chunk); inbound.nextIndex += 1
         sendEncrypted(["type": "mediaAck", "id": inbound.wireID, "index": index], only: connection)
-        transferStatus("Receiving image (inbound.data.count * 100 / inbound.expectedBytes)%")
+        let percent = inbound.expectedBytes > 0 ? (inbound.data.count * 100 / inbound.expectedBytes) : 0
+        transferStatus("Receiving image \(percent)%")
     }
     private func handleMediaAck(_ message: [String: Any], connection: NWConnection, context: Context) throws {
         guard let outbound = context.outboundImage, message["id"] as? String == outbound.image.id.uuidString,

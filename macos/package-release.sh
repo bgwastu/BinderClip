@@ -78,10 +78,10 @@ codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$OUTPUT_DIR/BinderClip-$VERSION.zip"
 
-DMG_STAGING="$OUTPUT_DIR/dmg-root"
+DMG_STAGING="$BUILD_ROOT/dmg-root"
 mkdir -p "$DMG_STAGING"
 cp -R "$APP_PATH" "$DMG_STAGING/BinderClip.app"
 ln -s /Applications "$DMG_STAGING/Applications"
 hdiutil create -volname "BinderClip $VERSION" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" >/dev/null
-rm -rf "$DMG_STAGING" "$APP_PATH"
+rm -rf "$BUILD_ROOT" "$APP_PATH"
 print "Created $DMG_PATH"

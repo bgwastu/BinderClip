@@ -9,7 +9,7 @@ import Sparkle
  FIRST VIEWPORT: the menu leads with live connection count, peers, then one pairing action.
  FORM: native menu-bar utility; compact operating panel rather than a dashboard.
 */
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let transport = DirectTransport()
     private let clipboard = ClipboardBridge()
     private let pairing = PairingWindow()
@@ -43,24 +43,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) { clipboard.stop(); transport.stop() }
 
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        renderMenu()
+    }
+
     private func renderMenu() {
         let menu = NSMenu()
+        menu.delegate = self
         renderPendingPermissions(into: menu)
-        let chainHeader = NSMenuItem(title: "This Chain", action: nil, keyEquivalent: "")
-        chainHeader.isEnabled = false
-        chainHeader.indentationLevel = 0
-        menu.addItem(chainHeader)
+        if #available(macOS 14.0, *) {
+            menu.addItem(.sectionHeader(title: "This Chain"))
+        } else {
+            let chainHeader = NSMenuItem(title: "This Chain", action: nil, keyEquivalent: "")
+            chainHeader.isEnabled = false
+            chainHeader.indentationLevel = 0
+            menu.addItem(chainHeader)
+        }
         let thisMac = NSMenuItem(title: "\(transport.localDeviceName) (current)", action: nil, keyEquivalent: "")
         thisMac.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "This Mac")
-        thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS")); menu.addItem(thisMac)
-        if peers.isEmpty {
-            let empty = NSMenuItem(title: "No Devices", action: nil, keyEquivalent: ""); empty.isEnabled = false; menu.addItem(empty)
-        } else {
-            for peer in peers {
-                let item = NSMenuItem(title: peer.name, action: nil, keyEquivalent: "")
-                item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
-                item.submenu = deviceMenu(for: peer); menu.addItem(item)
-            }
+        thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS"))
+        menu.addItem(thisMac)
+        for peer in peers {
+            let item = NSMenuItem(title: peer.name, action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
+            item.submenu = deviceMenu(for: peer)
+            menu.addItem(item)
         }
         menu.addItem(.separator())
         let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n"); pair.target = self; menu.addItem(pair)
@@ -126,8 +133,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn { transport.removeFromChain(id) }
     }
     @objc private func enableLaunchAtLogin() {
-        if SMAppService.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems(); return }
-        do { try SMAppService.mainApp.register() } catch { status = "Could not enable launch at login" }
+        let currentStatus = SMAppService.mainApp.status
+        if currentStatus == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+            renderMenu()
+            return
+        }
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            DiagnosticLog.shared.error("Failed to register launch at login: \(error.localizedDescription)")
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        renderMenu()
     }
     @objc private func openPrivacySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") else { return }

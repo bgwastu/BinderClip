@@ -4,30 +4,31 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.BroadcastReceiver
 import android.content.IntentFilter
-import android.os.PowerManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import net.wastu.binderclip.R
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import net.wastu.binderclip.R
 
 data class AppState(
     val status: String = "Not paired",
@@ -41,6 +42,7 @@ data class AppState(
     val accessibilityEnabled: Boolean = false,
     val localDeviceId: String = "",
 )
+
 object AppRuntime {
     val state = kotlinx.coroutines.flow.MutableStateFlow(AppState())
     val pairingUrl = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
@@ -62,8 +64,10 @@ class BinderClipService : Service() {
         const val ACTION_REQUEST_INVITE = "net.wastu.binderclip.REQUEST_INVITE"
         const val ACTION_SEARCH_RECONNECT = "net.wastu.binderclip.SEARCH_RECONNECT"
         const val EXTRA_MEMBER_ID = "member_id"
+        const val EXTRA_TARGET_DEVICE_ID = "target_device_id"
         const val EXTRA_URI = "uri"
         private const val CHANNEL = "binderclip_sync"
+        private const val URL_CHANNEL = "binderclip_urls"
         private const val NOTIFICATION_ID = 101
     }
 
@@ -77,13 +81,16 @@ class BinderClipService : Service() {
     private val reconnectExecutor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val reconnectAttempts = AtomicInteger(0)
     private var scheduledReconnectFuture: ScheduledFuture<*>? = null
-    @Volatile private var uiVisible = false
+    @Volatile
+    private var uiVisible = false
     private var suppressClipboard: String? = null
     private var suppressImageHash: String? = null
     private var pendingImage: ImagePayload? = null
     private var transferStatus: String? = null
-    @Volatile private var rootAvailable = false
-    @Volatile private var automaticClipboardEnabled = false
+    @Volatile
+    private var rootAvailable = false
+    @Volatile
+    private var automaticClipboardEnabled = false
     private var rootPoll: ScheduledFuture<*>? = null
     private var rootFingerprint: String? = null
     private var lastSentText: String? = null
@@ -97,6 +104,7 @@ class BinderClipService : Service() {
                     if (automaticClipboardEnabled) startRootPolling()
                     if (!client.isConnected()) resetReconnectBackoffAndTrigger("screen_on")
                 }
+
                 Intent.ACTION_SCREEN_OFF -> {
                     stopRootPolling()
                 }
@@ -105,13 +113,15 @@ class BinderClipService : Service() {
     }
 
     override fun onCreate() {
-        super.onCreate(); DiagnosticLog.initialize(this); store = DeviceStore(this); clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager; ImageClipboard.clearStale(this)
+        super.onCreate(); DiagnosticLog.initialize(this); store = DeviceStore(this); clipboard =
+            getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager; ImageClipboard.clearStale(this)
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         createChannel(); startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
         client = DirectClient(
             store = store,
             deviceName = DeviceNames.android(this),
             onText = ::receiveText,
+            onOpenUrl = ::receiveOpenUrl,
             onImage = ::receiveImage,
             onTransferStatus = ::updateTransferStatus,
             onStatus = ::updateStatus,
@@ -128,7 +138,8 @@ class BinderClipService : Service() {
         clipboard.addPrimaryClipChangedListener {
             if (uiVisible) executor.execute(::sendCurrentClipboard)
         }
-        AccessibilityClipboardBridge.onClipboard = { payload -> executor.execute { sendAccessibilityClipboard(payload) } }
+        AccessibilityClipboardBridge.onClipboard =
+            { payload -> executor.execute { sendAccessibilityClipboard(payload) } }
         AccessibilityClipboardBridge.onAvailabilityChanged = { executor.execute(::publishState) }
         registerNetworkCallback()
         startNsdDiscovery()
@@ -140,7 +151,10 @@ class BinderClipService : Service() {
         registerReceiver(screenStateReceiver, screenFilter)
         executor.execute {
             rootAvailable = RootClipboardBridge.isAvailable()
-            automaticClipboardEnabled = rootAvailable && store.isRootClipboardAutomationEnabled() && RootClipboardBridge.enableBackgroundAccess(this)
+            automaticClipboardEnabled =
+                rootAvailable && store.isRootClipboardAutomationEnabled() && RootClipboardBridge.enableBackgroundAccess(
+                    this
+                )
             if (store.peer != null) resetReconnectBackoffAndTrigger("service_create")
             if (automaticClipboardEnabled) startRootPolling()
             publishState()
@@ -150,27 +164,40 @@ class BinderClipService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action ?: ACTION_START) {
-            ACTION_PAIR -> intent?.getStringExtra(EXTRA_URI)?.let { uri -> executor.execute {
-                runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
-            } }
-            ACTION_SEND_CURRENT -> executor.execute { sendCurrentClipboard(userInitiated = true) }
-            ACTION_SEARCH_RECONNECT -> resetReconnectBackoffAndTrigger("user_reconnect")
-            ACTION_SEND_SHARED -> executor.execute {
-                when (val shared = SharedPayloadCache.value.also { SharedPayloadCache.value = null }) {
-                    is SharedPayload.Image -> sendSharedImage(shared.value)
-                    is SharedPayload.Text -> {
-                        applyText(shared.value)
-                        if (!client.isConnected()) client.reconnect()
-                        if (!client.isConnected()) reportFailure("Text copied, but no device is connected")
-                        else {
-                            lastSentText = shared.value
-                            lastSendAt = System.currentTimeMillis()
-                            client.sendText(shared.value)
-                        }
-                    }
-                    null -> reportFailure("Nothing to share")
+            ACTION_PAIR -> intent?.getStringExtra(EXTRA_URI)?.let { uri ->
+                executor.execute {
+                    runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
                 }
             }
+
+            ACTION_SEND_CURRENT -> executor.execute { sendCurrentClipboard(userInitiated = true) }
+            ACTION_SEARCH_RECONNECT -> resetReconnectBackoffAndTrigger("user_reconnect")
+            ACTION_SEND_SHARED -> {
+                val targetDeviceId = intent?.getStringExtra(EXTRA_TARGET_DEVICE_ID)
+                executor.execute {
+                    when (val shared = SharedPayloadCache.value.also { SharedPayloadCache.value = null }) {
+                        is SharedPayload.Image -> sendSharedImage(shared.value)
+                        is SharedPayload.Text -> {
+                            applyText(shared.value)
+                            if (!client.isConnected()) client.reconnect()
+                            if (!client.isConnected()) reportFailure("Content copied, but no device is connected")
+                            else {
+                                lastSentText = shared.value
+                                lastSendAt = System.currentTimeMillis()
+                                val trimmed = shared.value.trim()
+                                if (isWebUrl(trimmed)) {
+                                    client.sendOpenUrl(trimmed, targetDeviceId)
+                                } else {
+                                    client.sendText(shared.value, targetDeviceId)
+                                }
+                            }
+                        }
+
+                        null -> reportFailure("Nothing to share")
+                    }
+                }
+            }
+
             ACTION_REQUEST_INVITE -> executor.execute { client.requestInvite() }
             ACTION_COPY_PENDING -> {
                 store.pendingText?.let { text ->
@@ -185,10 +212,12 @@ class BinderClipService : Service() {
                 }
                 publishState()
             }
+
             ACTION_UI_VISIBLE -> {
                 uiVisible = intent?.getBooleanExtra("visible", false) ?: false
                 if (uiVisible && !client.isConnected()) resetReconnectBackoffAndTrigger("ui_visible")
             }
+
             ACTION_TOGGLE_ROOT_AUTOMATION -> executor.execute {
                 val enabled = intent?.getBooleanExtra("enabled", false) ?: false
                 rootAvailable = RootClipboardBridge.isAvailable()
@@ -207,6 +236,7 @@ class BinderClipService : Service() {
                     },
                 )
             }
+
             ACTION_REFRESH_CAPABILITIES -> executor.execute {
                 rootAvailable = RootClipboardBridge.isAvailable()
                 if ((!rootAvailable || !RootClipboardBridge.hasBackgroundAccess(this)) && automaticClipboardEnabled) {
@@ -216,7 +246,10 @@ class BinderClipService : Service() {
                 }
                 publishState()
             }
-            ACTION_REMOVE_MEMBER -> intent?.getStringExtra(EXTRA_MEMBER_ID)?.let { id -> executor.execute { client.removeMember(id) } }
+
+            ACTION_REMOVE_MEMBER -> intent?.getStringExtra(EXTRA_MEMBER_ID)
+                ?.let { id -> executor.execute { client.removeMember(id) } }
+
             ACTION_DISABLE_ACCESSIBILITY -> {
                 val disabled = AccessibilityClipboardBridge.disable()
                 executor.execute {
@@ -226,6 +259,7 @@ class BinderClipService : Service() {
                     }, 250)
                 }
             }
+
             ACTION_START -> if (store.peer != null && !client.isConnected()) resetReconnectBackoffAndTrigger("action_start")
         }
         return START_STICKY
@@ -248,6 +282,7 @@ class BinderClipService : Service() {
                 override fun onAvailable(network: Network) {
                     resetReconnectBackoffAndTrigger("network_available")
                 }
+
                 override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
                     if (networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
                         resetReconnectBackoffAndTrigger("network_capabilities")
@@ -264,7 +299,11 @@ class BinderClipService : Service() {
 
     private fun unregisterNetworkCallback() {
         networkCallback?.let {
-            runCatching { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) }
+            runCatching {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(
+                    it
+                )
+            }
             networkCallback = null
         }
     }
@@ -291,6 +330,7 @@ class BinderClipService : Service() {
                     }
                 }
             }
+
             override fun onServiceLost(service: NsdServiceInfo) {}
             override fun onDiscoveryStopped(serviceType: String) {}
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {}
@@ -328,7 +368,10 @@ class BinderClipService : Service() {
             }
         }, 0, 900, TimeUnit.MILLISECONDS)
     }
-    private fun stopRootPolling() { rootPoll?.cancel(true); rootPoll = null; rootFingerprint = null }
+
+    private fun stopRootPolling() {
+        rootPoll?.cancel(true); rootPoll = null; rootFingerprint = null
+    }
 
     private fun resetReconnectBackoffAndTrigger(reason: String = "") {
         reconnectAttempts.set(0)
@@ -363,14 +406,55 @@ class BinderClipService : Service() {
     private fun receiveText(text: String) {
         store.pendingText = text
         val applyImmediately = uiVisible || automaticClipboardEnabled
-        if (applyImmediately) { applyText(text); store.pendingText = null }
+        if (applyImmediately) {
+            applyText(text); store.pendingText = null
+        }
         publishState(); updateStatus(if (applyImmediately) "Received text" else "Text ready to copy")
     }
+
+    private fun receiveOpenUrl(url: String) {
+        val trimmed = url.trim()
+        if (!isWebUrl(trimmed)) {
+            receiveText(url)
+            return
+        }
+        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse(trimmed)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            trimmed.hashCode(),
+            viewIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notif = NotificationCompat.Builder(this, URL_CHANNEL)
+            .setSmallIcon(R.drawable.ic_binder_clip)
+            .setContentTitle("Open Link")
+            .setContentText(trimmed)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
+            .build()
+        nm.notify(System.currentTimeMillis().toInt(), notif)
+        updateStatus("Received link")
+        publishState()
+    }
+
+    private fun isWebUrl(text: String): Boolean {
+        val lower = text.lowercase()
+        return (lower.startsWith("http://") || lower.startsWith("https://")) && android.util.Patterns.WEB_URL.matcher(
+            text
+        ).matches()
+    }
+
     private fun receiveImage(image: ImagePayload) {
         val applyImmediately = uiVisible || automaticClipboardEnabled
         if (applyImmediately) applyImage(image) else pendingImage = image
         publishState(); updateStatus(if (applyImmediately) "Received image" else "Image ready to copy")
     }
+
     private fun sendCurrentClipboard(userInitiated: Boolean = false) {
         when (val content = ClipboardClassifier.read(this, clipboard)) {
             is LocalClipboardContent.Text -> sendTextIfFresh(content.value)
@@ -378,6 +462,7 @@ class BinderClipService : Service() {
             LocalClipboardContent.Unsupported -> if (userInitiated) reportFailure("Copy text or a supported image first")
         }
     }
+
     private fun sendAccessibilityClipboard(payload: AccessibilityClipboard) {
         if (rootAvailable || !AccessibilityClipboardBridge.isEnabled(this)) return
         when (payload) {
@@ -385,6 +470,7 @@ class BinderClipService : Service() {
             is AccessibilityClipboard.Image -> sendImageIfFresh(payload.value)
         }
     }
+
     private fun sendTextIfFresh(text: String) {
         if (!client.isConnected()) return
         if (text.isBlank() || text == suppressClipboard) return
@@ -392,6 +478,7 @@ class BinderClipService : Service() {
         if (text == lastSentText && now - lastSendAt < 1_500) return
         lastSentText = text; lastSendAt = now; client.sendText(text)
     }
+
     private fun sendImageIfFresh(image: ImagePayload) {
         if (!client.isConnected()) return
         if (image.sha256 == suppressImageHash) return
@@ -399,6 +486,7 @@ class BinderClipService : Service() {
         if (image.sha256 == lastSentImageHash && now - lastSendAt < 1_500) return
         lastSentImageHash = image.sha256; lastSendAt = now; client.sendImage(image)
     }
+
     private fun sendSharedImage(image: ImagePayload) {
         // A share is also a local copy operation. Suppression prevents the
         // clipboard listener/root bridge from turning it into a second send.
@@ -412,6 +500,7 @@ class BinderClipService : Service() {
         lastSendAt = System.currentTimeMillis()
         client.sendImage(image)
     }
+
     private fun applyText(text: String) {
         suppressClipboard = text
         rootFingerprint = "text:$text"
@@ -420,19 +509,28 @@ class BinderClipService : Service() {
         clipboard.setPrimaryClip(ClipData.newPlainText("BinderClip", text))
         android.os.Handler(mainLooper).postDelayed({ if (suppressClipboard == text) suppressClipboard = null }, 1_500)
     }
+
     private fun applyImage(image: ImagePayload) {
         suppressImageHash = image.sha256
         rootFingerprint = "image:${image.sha256}"
         lastSentImageHash = image.sha256
         lastSendAt = System.currentTimeMillis()
         ImageClipboard.write(this, clipboard, image)
-        android.os.Handler(mainLooper).postDelayed({ if (suppressImageHash == image.sha256) suppressImageHash = null }, 1_500)
+        android.os.Handler(mainLooper)
+            .postDelayed({ if (suppressImageHash == image.sha256) suppressImageHash = null }, 1_500)
     }
+
     private fun updateStatus(message: String) {
         Log.i("BinderClip", message)
         if (!message.startsWith("Sending image") && !message.startsWith("Receiving image")) {
-            if (message.contains("failed", ignoreCase = true) || message.contains("lost", ignoreCase = true)) DiagnosticLog.warning(message)
-            else if (message.startsWith("Connected") || message.startsWith("Paired") || message.startsWith("Received") || message == "Image sent") DiagnosticLog.info(message)
+            if (message.contains("failed", ignoreCase = true) || message.contains(
+                    "lost",
+                    ignoreCase = true
+                )
+            ) DiagnosticLog.warning(message)
+            else if (message.startsWith("Connected") || message.startsWith("Paired") || message.startsWith("Received") || message == "Image sent") DiagnosticLog.info(
+                message
+            )
         }
         val peer = store.peer
         AppRuntime.state.value = AppState(
@@ -447,19 +545,31 @@ class BinderClipService : Service() {
             accessibilityEnabled = AccessibilityClipboardBridge.isEnabled(this),
             localDeviceId = store.deviceId,
         )
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification(message))
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(
+            NOTIFICATION_ID,
+            notification(message)
+        )
     }
+
     private fun toast(message: String) = android.os.Handler(mainLooper).post {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
-    private fun updateTransferStatus(message: String) { transferStatus = message; updateStatus(message) }
+
+    private fun updateTransferStatus(message: String) {
+        transferStatus = message; updateStatus(message)
+    }
+
     private fun reportFailure(message: String) {
         DiagnosticLog.error(message)
         transferStatus = message
         updateStatus(message)
         toast(message)
     }
-    private fun publishState() { updateStatus(connectionSummary()) }
+
+    private fun publishState() {
+        updateStatus(connectionSummary())
+    }
+
     private fun connectionSummary(): String {
         if (store.peer == null) return "No trusted device"
         if (!client.isConnected()) return "Waiting for ${store.peer?.name ?: "device"}"
@@ -474,8 +584,14 @@ class BinderClipService : Service() {
             else -> "Connected to ${names.size} Devices"
         }
     }
+
     private fun notification(status: String): android.app.Notification {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val open = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val builder = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_binder_clip)
             .setContentTitle("BinderClip")
@@ -487,15 +603,36 @@ class BinderClipService : Service() {
             val percent = percentMatch.groupValues[1].toIntOrNull() ?: 0
             builder.setProgress(100, percent, false)
         }
-        val send = PendingIntent.getService(this, 2, Intent(this, BinderClipService::class.java).setAction(ACTION_SEND_CURRENT), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val send = PendingIntent.getService(
+            this,
+            2,
+            Intent(this, BinderClipService::class.java).setAction(ACTION_SEND_CURRENT),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         builder.addAction(0, "Send clipboard", send)
         if (store.pendingText != null || pendingImage != null) {
-            val copy = PendingIntent.getService(this, 1, Intent(this, BinderClipService::class.java).setAction(ACTION_COPY_PENDING), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            val copy = PendingIntent.getService(
+                this,
+                1,
+                Intent(this, BinderClipService::class.java).setAction(ACTION_COPY_PENDING),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             builder.addAction(0, if (pendingImage != null) "Copy image" else "Copy text", copy)
         }
         return builder.build()
     }
+
     private fun createChannel() {
-        if (Build.VERSION.SDK_INT >= 26) (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(NotificationChannel(CHANNEL, "BinderClip sync", NotificationManager.IMPORTANCE_LOW))
+        if (Build.VERSION.SDK_INT >= 26) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL, "BinderClip sync", NotificationManager.IMPORTANCE_LOW)
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(URL_CHANNEL, "BinderClip links", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Shared web links from connected devices"
+                }
+            )
+        }
     }
 }

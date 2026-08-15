@@ -22,6 +22,19 @@ class DirectProtocolTest {
         assertEquals("hello", opened.getString("text"))
     }
 
+    @Test fun openUrlFramingAndTargetDeviceIdRoundTrip() {
+        val key = ByteArray(32) { it.toByte() }
+        val message = JSONObject().put("type", "openUrl").put("url", "https://example.com").put("targetDeviceId", "device-xyz")
+        val encrypted = DirectProtocol.seal(message, key)
+        val output = ByteArrayOutputStream()
+        DirectProtocol.write(DataOutputStream(output), encrypted)
+        val decoded = DirectProtocol.read(DataInputStream(ByteArrayInputStream(output.toByteArray())))
+        val opened = DirectProtocol.open(decoded, key)
+        assertEquals("openUrl", opened.getString("type"))
+        assertEquals("https://example.com", opened.getString("url"))
+        assertEquals("device-xyz", opened.getString("targetDeviceId"))
+    }
+
     @Test fun pairingKeyIsStableAndAuthenticationIsConstantTimeComparable() {
         val first = DirectProtocol.pairSessionKey(ByteArray(32) { 7 }, "client", "server")
         val second = DirectProtocol.pairSessionKey(ByteArray(32) { 7 }, "client", "server")

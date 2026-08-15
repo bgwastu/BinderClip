@@ -35,6 +35,7 @@ final class DirectTransport {
     static let maximumTextBytes = 1_048_576
 
     var onClipboard: ((String) -> Void)?
+    var onOpenURL: ((URL) -> Void)?
     var onImage: ((ImagePayload) -> Void)?
     var onTransferStatus: ((String) -> Void)?
     var onPeersChanged: (([Peer]) -> Void)?
@@ -204,20 +205,53 @@ final class DirectTransport {
         return components.url
     }
 
-    func sendClipboard(_ text: String) {
+    func sendClipboard(_ text: String, targetDeviceId: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
             guard !text.isEmpty, text.utf8.count <= Self.maximumTextBytes else {
                 self.transferStatus("Clipboard not sent — unsupported content")
                 return
             }
-            guard self.connections.values.contains(where: { self.contexts[ObjectIdentifier($0)]?.peerID != nil }) else {
+            let targetConnections = self.connections.values.filter { connection in
+                guard let peerID = self.contexts[ObjectIdentifier(connection)]?.peerID else { return false }
+                return targetDeviceId == nil || peerID == targetDeviceId
+            }
+            guard !targetConnections.isEmpty else {
                 self.transferStatus("Clipboard not sent — no connected device")
                 return
             }
-            let operation: [String: Any] = ["type": "clipboard", "id": UUID().uuidString, "origin": self.localID,
-                                             "timestamp": UInt64(Date().timeIntervalSince1970 * 1_000), "text": text]
-            self.sendEncrypted(operation, only: nil)
+            var operation: [String: Any] = ["type": "clipboard", "id": UUID().uuidString, "origin": self.localID,
+                                            "timestamp": UInt64(Date().timeIntervalSince1970 * 1_000), "text": text]
+            if let targetDeviceId { operation["targetDeviceId"] = targetDeviceId }
+            for connection in targetConnections {
+                self.sendEncrypted(operation, only: connection)
+            }
+        }
+    }
+
+    func sendOpenURL(_ url: URL, targetDeviceId: String? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let urlString = url.absoluteString
+            guard !urlString.isEmpty, urlString.utf8.count <= Self.maximumTextBytes else {
+                self.transferStatus("URL not sent — invalid content")
+                return
+            }
+            let targetConnections = self.connections.values.filter { connection in
+                guard let peerID = self.contexts[ObjectIdentifier(connection)]?.peerID else { return false }
+                return targetDeviceId == nil || peerID == targetDeviceId
+            }
+            guard !targetConnections.isEmpty else {
+                self.transferStatus("URL not sent — no connected device")
+                return
+            }
+            var operation: [String: Any] = ["type": "openUrl", "id": UUID().uuidString, "origin": self.localID,
+                                            "timestamp": UInt64(Date().timeIntervalSince1970 * 1_000), "url": urlString]
+            if let targetDeviceId { operation["targetDeviceId"] = targetDeviceId }
+            for connection in targetConnections {
+                self.sendEncrypted(operation, only: connection)
+            }
+            self.transferStatus("Sent URL to peer")
         }
     }
 
@@ -308,6 +342,9 @@ final class DirectTransport {
             }
         case "clipboard":
             guard let text = message["text"] as? String, text.utf8.count <= Self.maximumTextBytes else { throw DirectCryptoError.malformed }
+            if let target = message["targetDeviceId"] as? String, !target.isEmpty, target != localID {
+                return
+            }
             if let msgID = message["id"] as? String {
                 if recentMessageIDs.contains(msgID) { return }
                 recentMessageIDs.append(msgID)
@@ -315,6 +352,20 @@ final class DirectTransport {
             }
             log("Received clipboard text")
             onClipboard?(text)
+        case "openUrl":
+            guard let urlString = message["url"] as? String, urlString.utf8.count <= Self.maximumTextBytes,
+                  let url = URL(string: urlString), let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { throw DirectCryptoError.malformed }
+            if let target = message["targetDeviceId"] as? String, !target.isEmpty, target != localID {
+                return
+            }
+            if let msgID = message["id"] as? String {
+                if recentMessageIDs.contains(msgID) { return }
+                recentMessageIDs.append(msgID)
+                if recentMessageIDs.count > 64 { recentMessageIDs.removeFirst() }
+            }
+            log("Received URL to open")
+            onOpenURL?(url)
         case "ping":
             sendEncrypted(["type": "pong"], only: connection)
         case "pong":

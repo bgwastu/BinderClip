@@ -78,7 +78,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            versionNameSuffix = "-debug"
+            manifestPlaceholders["appLabel"] = "BinderClip (Debug)"
+        }
         release {
+            manifestPlaceholders["appLabel"] = "BinderClip"
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.outlined.AccessibilityNew
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.BatteryChargingFull
 import androidx.compose.material.icons.outlined.CameraAlt
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.LaptopMac
 import androidx.compose.material.icons.outlined.Notifications
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material3.AlertDialog
@@ -93,7 +96,8 @@ class MainActivity : AppCompatActivity() {
         permissionRevision += 1
         if (granted) scan()
     }
-    private val requestNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { permissionRevision += 1 }
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { permissionRevision += 1 }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); DiagnosticLog.initialize(this); startService(BinderClipService.ACTION_START)
@@ -103,11 +107,17 @@ class MainActivity : AppCompatActivity() {
                 val state by AppRuntime.state.collectAsState()
                 val revision = permissionRevision
                 val cameraGranted = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                val notificationsGranted = Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                val notificationsGranted =
+                    Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
                 val power = getSystemService(PowerManager::class.java)
-                val batteryOptimizationIgnored = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || power.isIgnoringBatteryOptimizations(packageName)
-                val backgroundRestricted = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && getSystemService(ActivityManager::class.java).isBackgroundRestricted
-                val autoStartHelpNeeded = !getSharedPreferences("binderclip", MODE_PRIVATE).getBoolean("auto_start_help_seen", false) || backgroundRestricted
+                val batteryOptimizationIgnored =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.M || power.isIgnoringBatteryOptimizations(packageName)
+                val backgroundRestricted =
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && getSystemService(ActivityManager::class.java).isBackgroundRestricted
+                val autoStartHelpNeeded = !getSharedPreferences("binderclip", MODE_PRIVATE).getBoolean(
+                    "auto_start_help_seen",
+                    false
+                ) || backgroundRestricted
                 DisposableEffect(Unit) {
                     startService(BinderClipService.ACTION_UI_VISIBLE, visible = true)
                     onDispose { startService(BinderClipService.ACTION_UI_VISIBLE, visible = false) }
@@ -129,7 +139,12 @@ class MainActivity : AppCompatActivity() {
                     onSend = { startService(BinderClipService.ACTION_SEND_CURRENT) },
                     onCopy = { startService(BinderClipService.ACTION_COPY_PENDING) },
                     onReconnect = { startService(BinderClipService.ACTION_SEARCH_RECONNECT) },
-                    onToggleRoot = { enabled -> startService(BinderClipService.ACTION_TOGGLE_ROOT_AUTOMATION, enabled = enabled) },
+                    onToggleRoot = { enabled ->
+                        startService(
+                            BinderClipService.ACTION_TOGGLE_ROOT_AUTOMATION,
+                            enabled = enabled
+                        )
+                    },
                     onDisableAccessibility = { startService(BinderClipService.ACTION_DISABLE_ACCESSIBILITY) },
                     onRemove = { id -> startService(BinderClipService.ACTION_REMOVE_MEMBER, memberId = id) },
                 )
@@ -143,37 +158,107 @@ class MainActivity : AppCompatActivity() {
         startService(BinderClipService.ACTION_REFRESH_CAPABILITIES)
     }
 
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); intent.dataString?.takeIf { it.startsWith("binderclip://invite") }?.let(::pair) }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent); setIntent(intent); intent.dataString?.takeIf { it.startsWith("binderclip://invite") }
+            ?.let(::pair)
+    }
+
     private fun scan() {
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scanner.launch(Intent(this, QrScannerActivity::class.java))
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scanner.launch(
+            Intent(
+                this,
+                QrScannerActivity::class.java
+            )
+        )
         else requestCamera.launch(Manifest.permission.CAMERA)
     }
-    private fun pair(uri: String) { ContextCompat.startForegroundService(this, Intent(this, BinderClipService::class.java).setAction(BinderClipService.ACTION_PAIR).putExtra(BinderClipService.EXTRA_URI, uri)) }
+
+    private fun pair(uri: String) {
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, BinderClipService::class.java).setAction(BinderClipService.ACTION_PAIR)
+                .putExtra(BinderClipService.EXTRA_URI, uri)
+        )
+    }
+
     private fun requestBatteryOptimization() {
         val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
         runCatching { startActivity(request) }.getOrElse {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         }
     }
+
     private fun openAutoStartSettings() {
         getSharedPreferences("binderclip", MODE_PRIVATE).edit().putBoolean("auto_start_help_seen", true).apply()
         val manufacturer = android.os.Build.MANUFACTURER.lowercase()
         val candidates = mutableListOf<Intent>()
         when {
             manufacturer.contains("xiaomi") || manufacturer.contains("redmi") -> {
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")))
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.miui.securitycenter",
+                            "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                        )
+                    )
+                )
             }
+
             manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme") -> {
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")))
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity")))
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.coloros.safecenter",
+                            "com.coloros.safecenter.permission.startup.StartupAppListActivity"
+                        )
+                    )
+                )
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.oppo.safe",
+                            "com.oppo.safe.permission.startup.StartupAppListActivity"
+                        )
+                    )
+                )
             }
+
             manufacturer.contains("vivo") -> {
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")))
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager")))
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.vivo.permissionmanager",
+                            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
+                        )
+                    )
+                )
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.iqoo.secure",
+                            "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"
+                        )
+                    )
+                )
             }
+
             manufacturer.contains("huawei") || manufacturer.contains("honor") -> {
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")))
-                candidates.add(Intent().setComponent(android.content.ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")))
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.huawei.systemmanager",
+                            "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+                        )
+                    )
+                )
+                candidates.add(
+                    Intent().setComponent(
+                        android.content.ComponentName(
+                            "com.huawei.systemmanager",
+                            "com.huawei.systemmanager.optimize.process.ProtectActivity"
+                        )
+                    )
+                )
             }
         }
         for (intent in candidates) {
@@ -184,7 +269,13 @@ class MainActivity : AppCompatActivity() {
         // Fallback: standard App Info page
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
-    private fun startService(action: String, visible: Boolean? = null, enabled: Boolean? = null, memberId: String? = null) {
+
+    private fun startService(
+        action: String,
+        visible: Boolean? = null,
+        enabled: Boolean? = null,
+        memberId: String? = null
+    ) {
         ContextCompat.startForegroundService(this, Intent(this, BinderClipService::class.java).setAction(action).also {
             if (visible != null) it.putExtra("visible", visible)
             if (enabled != null) it.putExtra("enabled", enabled)
@@ -194,12 +285,27 @@ class MainActivity : AppCompatActivity() {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun BinderClipScreen(
-    state: AppState, cameraGranted: Boolean, notificationsGranted: Boolean, batteryOptimizationIgnored: Boolean, autoStartHelpNeeded: Boolean, permissionRevision: Int,
-    onScan: () -> Unit, onRequestCamera: () -> Unit, onRequestNotifications: () -> Unit, onOpenAccessibility: () -> Unit,
-    onRequestBatteryOptimization: () -> Unit, onOpenAppDetails: () -> Unit,
-    onRequestInvite: () -> Unit, onSend: () -> Unit, onCopy: () -> Unit, onReconnect: () -> Unit, onToggleRoot: (Boolean) -> Unit,
-    onDisableAccessibility: () -> Unit, onRemove: (String) -> Unit,
+@Composable
+private fun BinderClipScreen(
+    state: AppState,
+    cameraGranted: Boolean,
+    notificationsGranted: Boolean,
+    batteryOptimizationIgnored: Boolean,
+    autoStartHelpNeeded: Boolean,
+    permissionRevision: Int,
+    onScan: () -> Unit,
+    onRequestCamera: () -> Unit,
+    onRequestNotifications: () -> Unit,
+    onOpenAccessibility: () -> Unit,
+    onRequestBatteryOptimization: () -> Unit,
+    onOpenAppDetails: () -> Unit,
+    onRequestInvite: () -> Unit,
+    onSend: () -> Unit,
+    onCopy: () -> Unit,
+    onReconnect: () -> Unit,
+    onToggleRoot: (Boolean) -> Unit,
+    onDisableAccessibility: () -> Unit,
+    onRemove: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -207,37 +313,83 @@ class MainActivity : AppCompatActivity() {
     var showLogs by remember { mutableStateOf(false) }
     val pairingUrl by AppRuntime.pairingUrl.collectAsState()
     val diagnosticEvents by DiagnosticLog.events.collectAsState()
-    val clipboardManager = remember { context.getSystemService(android.content.ClipboardManager::class.java) }
-    val currentClipboardSnippet = remember(permissionRevision, state.pendingText, state.pendingImage) {
-        runCatching {
-            val clip = clipboardManager?.primaryClip
-            if (clip != null && clip.itemCount > 0) {
-                val item = clip.getItemAt(0)
-                if (item.uri != null) "Image ready in clipboard"
-                else if (!item.text.isNullOrBlank()) {
-                    val trimmed = item.text.toString().trim()
-                    val line = trimmed.lines().firstOrNull() ?: trimmed
-                    if (line.length > 32) line.take(30) + "…" else line
-                } else null
-            } else null
-        }.getOrNull()
-    }
     val devices = buildList {
         addAll(state.members)
         state.peer?.let(::add)
-        if (state.peer != null && none { it.deviceId == state.localDeviceId }) add(RememberedPeer(DeviceNames.android(context), "", 39_421, state.localDeviceId, "Android", true))
+        if (state.peer != null && none { it.deviceId == state.localDeviceId }) add(
+            RememberedPeer(
+                DeviceNames.android(
+                    context
+                ), "", 39_421, state.localDeviceId, "Android", true
+            )
+        )
     }.map { device ->
-        if (device.deviceId == state.localDeviceId) device.copy(name = DeviceNames.android(context), platform = "Android") else device
-    }.distinctBy { it.deviceId }.sortedWith(compareByDescending<RememberedPeer> { it.deviceId == state.localDeviceId }.thenBy { it.name.lowercase() })
+        if (device.deviceId == state.localDeviceId) device.copy(
+            name = DeviceNames.android(context),
+            platform = "Android"
+        ) else device
+    }.distinctBy { it.deviceId }
+        .sortedWith(compareByDescending<RememberedPeer> { it.deviceId == state.localDeviceId }.thenBy { it.name.lowercase() })
     // Read so the composition updates immediately after Android's permission result.
     permissionRevision.hashCode()
     val missingPermissions = buildList {
-        if (!cameraGranted) add(PermissionNeed("Camera", "Scan pairing codes", Icons.Outlined.CameraAlt, onRequestCamera))
-        if (!notificationsGranted) add(PermissionNeed("Notifications", "Show received clipboard", Icons.Outlined.Notifications, onRequestNotifications))
-        if (!state.rootAvailable && !state.accessibilityEnabled) add(PermissionNeed("Automatic Sync Clipboard", "Enable Accessibility", Icons.Outlined.AccessibilityNew, onOpenAccessibility))
-        if (!batteryOptimizationIgnored) add(PermissionNeed("Battery Optimization", "Allow reliable background sync", Icons.Outlined.BatteryChargingFull, onRequestBatteryOptimization))
-        if (autoStartHelpNeeded) add(PermissionNeed("Auto Start", "Allow background start for reliable sync", Icons.Outlined.Settings, onOpenAppDetails, "Open"))
+        if (!cameraGranted) add(
+            PermissionNeed(
+                "Camera",
+                "Scan pairing codes",
+                Icons.Outlined.CameraAlt,
+                onRequestCamera
+            )
+        )
+        if (!notificationsGranted) add(
+            PermissionNeed(
+                "Notifications",
+                "Show received clipboard",
+                Icons.Outlined.Notifications,
+                onRequestNotifications
+            )
+        )
+        if (!state.rootAvailable && !state.accessibilityEnabled) add(
+            PermissionNeed(
+                "Automatic Sync Clipboard",
+                "Enable Accessibility",
+                Icons.Outlined.AccessibilityNew,
+                onOpenAccessibility
+            )
+        )
+        if (!batteryOptimizationIgnored) add(
+            PermissionNeed(
+                "Battery Optimization",
+                "Allow reliable background sync",
+                Icons.Outlined.BatteryChargingFull,
+                onRequestBatteryOptimization
+            )
+        )
+        if (autoStartHelpNeeded) add(
+            PermissionNeed(
+                "Auto Start",
+                "Allow background start for reliable sync",
+                Icons.Outlined.Settings,
+                onOpenAppDetails,
+                "Open"
+            )
+        )
     }
+    var sentOverlayMessage by remember { mutableStateOf<String?>(null) }
+    var sentOverlayIsSuccess by remember { mutableStateOf(true) }
+
+    LaunchedEffect(state.status) {
+        if (state.status.startsWith("Sending") || state.status.startsWith("Offering") || state.status.startsWith("Opening link")) {
+            sentOverlayMessage = state.status
+            sentOverlayIsSuccess = false
+        } else if (state.status == "Sent URL to peer" || state.status == "Image sent" || state.status.startsWith("Received") || state.status.startsWith("Opened URL")) {
+            sentOverlayMessage = if (state.status == "Sent URL to peer") "URL sent successfully" else if (state.status == "Image sent") "Image sent successfully" else state.status
+            sentOverlayIsSuccess = true
+            kotlinx.coroutines.delay(2200)
+            sentOverlayMessage = null
+        }
+    }
+
     Scaffold(topBar = {
         TopAppBar(
             title = {
@@ -259,61 +411,61 @@ class MainActivity : AppCompatActivity() {
             },
         )
     }) { insets ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(insets),
-            contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            item {
-                ChainHeader(status = state.status, onReconnect = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onReconnect()
-                })
-            }
-            if (devices.isEmpty()) item { EmptyChain() }
-            else items(devices.size, key = { devices[it].deviceId }) { index ->
-                val device = devices[index]
-                DeviceRow(device, isCurrentDevice = device.deviceId == state.localDeviceId, onClick = { selectedDevice = device })
-            }
+        Box(modifier = Modifier.fillMaxSize().padding(insets)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                item {
+                    ChainHeader(status = state.status, onReconnect = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onReconnect()
+                    })
+                }
+                if (devices.isEmpty()) item { EmptyChain() }
+                else items(devices.size, key = { devices[it].deviceId }) { index ->
+                    val device = devices[index]
+                    DeviceRow(
+                        device,
+                        isCurrentDevice = device.deviceId == state.localDeviceId,
+                        onClick = { selectedDevice = device })
+                }
             item {
                 if (devices.isEmpty()) FilledTonalButton(onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onScan()
                 }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Scan a code")
+                    Icon(
+                        Icons.Outlined.QrCodeScanner,
+                        contentDescription = null
+                    ); Spacer(Modifier.width(10.dp)); Text("Scan a code")
                 } else FilledTonalButton(onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onRequestInvite()
                 }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Icon(Icons.Outlined.Add, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Add device")
+                    Icon(
+                        Icons.Outlined.Add,
+                        contentDescription = null
+                    ); Spacer(Modifier.width(10.dp)); Text("Add device")
                 }
-            }
-            if (currentClipboardSnippet != null) {
-                item {
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Outlined.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Ready: “$currentClipboardSnippet”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-            } else {
-                item { Spacer(Modifier.height(8.dp)) }
             }
             item {
-                Button(onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onSend()
-                }, enabled = devices.any { it.connected && it.deviceId != state.localDeviceId }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = null); Spacer(Modifier.width(10.dp)); Text("Send current clipboard")
+                Spacer(Modifier.height(8.dp))
+            }
+            item {
+                Button(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onSend()
+                    },
+                    enabled = devices.any { it.connected && it.deviceId != state.localDeviceId },
+                    modifier = Modifier.fillMaxWidth().height(52.dp)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Send,
+                        contentDescription = null
+                    ); Spacer(Modifier.width(10.dp)); Text("Send current clipboard")
                 }
             }
             if (missingPermissions.isNotEmpty()) {
@@ -324,7 +476,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             if (state.pendingText || state.pendingImage) item {
-                ListItem(headlineContent = { Text(if (state.pendingImage) "Image ready to copy" else "Text ready to copy") }, trailingContent = { TextButton(onClick = onCopy) { Text("Copy") } })
+                ListItem(
+                    headlineContent = { Text(if (state.pendingImage) "Image ready to copy" else "Text ready to copy") },
+                    trailingContent = { TextButton(onClick = onCopy) { Text("Copy") } })
             }
             item { SectionTitle("Settings", topPadding = 16.dp) }
             item {
@@ -342,11 +496,57 @@ class MainActivity : AppCompatActivity() {
                             onChanged = { enabled -> if (enabled) onOpenAccessibility() else onDisableAccessibility() },
                         )
                         Text(
-                            "Tip: You can also use the BinderClip Quick Settings Tile or notification action to send clipboard instantly without root.",
+                            "Tip: You can also use the notification action or share sheet to send content instantly without root.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                         )
+                    }
+                }
+            }
+        }
+
+            androidx.compose.animation.AnimatedVisibility(
+                visible = sentOverlayMessage != null,
+                enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically(initialOffsetY = { it / 2 }),
+                exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically(targetOffsetY = { it / 2 }),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp)
+            ) {
+                sentOverlayMessage?.let { msg ->
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = if (sentOverlayIsSuccess) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        shadowElevation = 6.dp,
+                        tonalElevation = 4.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (sentOverlayIsSuccess) {
+                                Icon(
+                                    imageVector = Icons.Outlined.CheckCircle,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            } else {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (sentOverlayIsSuccess) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -363,7 +563,11 @@ class MainActivity : AppCompatActivity() {
                     Text("IP: ${target.host.takeIf { it.isNotBlank() } ?: "Unavailable"}")
                 }
             },
-            confirmButton = { TextButton(onClick = { onRemove(target.deviceId); selectedDevice = null }) { Text("Remove From Chain") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRemove(target.deviceId); selectedDevice = null
+                }) { Text("Remove From Chain") }
+            },
             dismissButton = { TextButton(onClick = { selectedDevice = null }) { Text("Close") } },
         )
     }
@@ -374,7 +578,7 @@ class MainActivity : AppCompatActivity() {
         val filteredEvents = remember(diagnosticEvents, logQuery, selectedFilter) {
             diagnosticEvents.filter { event ->
                 (selectedFilter == null || event.level == selectedFilter) &&
-                (logQuery.isBlank() || event.message.contains(logQuery, ignoreCase = true))
+                        (logQuery.isBlank() || event.message.contains(logQuery, ignoreCase = true))
             }
         }
         AlertDialog(
@@ -408,17 +612,26 @@ class MainActivity : AppCompatActivity() {
                         )
                         androidx.compose.material3.FilterChip(
                             selected = selectedFilter == DiagnosticLevel.Info,
-                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Info) null else DiagnosticLevel.Info },
+                            onClick = {
+                                selectedFilter =
+                                    if (selectedFilter == DiagnosticLevel.Info) null else DiagnosticLevel.Info
+                            },
                             label = { Text("Info") }
                         )
                         androidx.compose.material3.FilterChip(
                             selected = selectedFilter == DiagnosticLevel.Warning,
-                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Warning) null else DiagnosticLevel.Warning },
+                            onClick = {
+                                selectedFilter =
+                                    if (selectedFilter == DiagnosticLevel.Warning) null else DiagnosticLevel.Warning
+                            },
                             label = { Text("Warning") }
                         )
                         androidx.compose.material3.FilterChip(
                             selected = selectedFilter == DiagnosticLevel.Error,
-                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Error) null else DiagnosticLevel.Error },
+                            onClick = {
+                                selectedFilter =
+                                    if (selectedFilter == DiagnosticLevel.Error) null else DiagnosticLevel.Error
+                            },
                             label = { Text("Error") }
                         )
                     }
@@ -440,7 +653,9 @@ class MainActivity : AppCompatActivity() {
                             items(filteredEvents.size, key = { filteredEvents[it].timestamp }) { index ->
                                 val event = filteredEvents[filteredEvents.lastIndex - index]
                                 Text(
-                                    "${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(event.timestamp))} · ${event.message}",
+                                    "${
+                                        DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(event.timestamp))
+                                    } · ${event.message}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = when (event.level) {
                                         DiagnosticLevel.Error -> MaterialTheme.colorScheme.error
@@ -459,55 +674,139 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-private data class PermissionNeed(val title: String, val summary: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val onClick: () -> Unit, val actionLabel: String = "Allow")
+private data class PermissionNeed(
+    val title: String,
+    val summary: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val onClick: () -> Unit,
+    val actionLabel: String = "Allow"
+)
 
-@Composable private fun PermissionRow(need: PermissionNeed) = ListItem(
+@Composable
+private fun PermissionRow(need: PermissionNeed) = ListItem(
     headlineContent = { Text(need.title) },
     supportingContent = { Text(need.summary) },
     leadingContent = { Icon(need.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
     trailingContent = { TextButton(onClick = need.onClick) { Text(need.actionLabel) } },
 )
-@Composable private fun EmptyChain() = ListItem(headlineContent = { Text("No devices yet") }, supportingContent = { Text("Scan a code to join.") })
-@Composable private fun ChainHeader(status: String, onReconnect: () -> Unit) = Row(
+
+@Composable
+private fun EmptyChain() =
+    ListItem(headlineContent = { Text("No devices yet") }, supportingContent = { Text("Scan a code to join.") })
+
+@Composable
+private fun ChainHeader(status: String, onReconnect: () -> Unit) = Row(
     modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.SpaceBetween
 ) {
     Text("This chain", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            status,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
         if (status.startsWith("Waiting") || status.startsWith("Searching") || status.startsWith("Connection")) {
             Spacer(Modifier.width(4.dp))
             IconButton(onClick = onReconnect, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Outlined.Refresh, contentDescription = "Reconnect", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = "Reconnect",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }
 }
-@Composable private fun SectionTitle(text: String, topPadding: androidx.compose.ui.unit.Dp = 14.dp) = Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = topPadding, bottom = 2.dp))
-@Composable private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, onClick: () -> Unit) {
+
+@Composable
+private fun SectionTitle(text: String, topPadding: androidx.compose.ui.unit.Dp = 14.dp) = Text(
+    text,
+    style = MaterialTheme.typography.titleSmall,
+    color = MaterialTheme.colorScheme.primary,
+    modifier = Modifier.padding(top = topPadding, bottom = 2.dp)
+)
+
+@Composable
+private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, onClick: () -> Unit) {
     val container = if (isCurrentDevice) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-    Box(modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(MaterialTheme.shapes.medium).background(container).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp)) {
-        Box(Modifier.align(Alignment.CenterStart).size(36.dp).clip(MaterialTheme.shapes.small).background(if (isCurrentDevice) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-            Icon(if (member.platform == "macOS") Icons.Outlined.LaptopMac else Icons.Outlined.Android, contentDescription = if (member.platform == "macOS") "Mac" else "Android", tint = if (isCurrentDevice) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+    Box(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(MaterialTheme.shapes.medium).background(container)
+            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Box(
+            Modifier.align(Alignment.CenterStart).size(36.dp).clip(MaterialTheme.shapes.small)
+                .background(if (isCurrentDevice) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                if (member.platform == "macOS") Icons.Outlined.LaptopMac else Icons.Outlined.Android,
+                contentDescription = if (member.platform == "macOS") "Mac" else "Android",
+                tint = if (isCurrentDevice) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
         }
-        Column(Modifier.fillMaxWidth().padding(start = 48.dp).align(Alignment.CenterStart), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(member.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (isCurrentDevice) FontWeight.SemiBold else FontWeight.Normal)
+        Column(
+            Modifier.fillMaxWidth().padding(start = 48.dp).align(Alignment.CenterStart),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                member.name,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = if (isCurrentDevice) FontWeight.SemiBold else FontWeight.Normal
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(member.connected, 7.dp); Spacer(Modifier.width(8.dp))
-                Text(if (isCurrentDevice) "This device" else if (member.connected) "Connected" else "Searching", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (isCurrentDevice) "This device" else if (member.connected) "Connected" else "Searching",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
 }
-@Composable private fun StatusDot(connected: Boolean, size: androidx.compose.ui.unit.Dp) = Box(Modifier.size(size).clip(MaterialTheme.shapes.extraLarge).background(if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant))
-@Composable private fun PreferenceToggle(title: String, summary: String, checked: Boolean, onChanged: (Boolean) -> Unit) = ListItem(headlineContent = { Text(title) }, supportingContent = { Text(summary) }, trailingContent = { Switch(checked = checked, onCheckedChange = onChanged) })
-@Composable private fun PairingCodeDialog(url: String, onDismiss: () -> Unit) {
+
+@Composable
+private fun StatusDot(connected: Boolean, size: androidx.compose.ui.unit.Dp) = Box(
+    Modifier.size(size).clip(MaterialTheme.shapes.extraLarge)
+        .background(if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+)
+
+@Composable
+private fun PreferenceToggle(title: String, summary: String, checked: Boolean, onChanged: (Boolean) -> Unit) = ListItem(
+    headlineContent = { Text(title) },
+    supportingContent = { Text(summary) },
+    trailingContent = { Switch(checked = checked, onCheckedChange = onChanged) })
+
+@Composable
+private fun PairingCodeDialog(url: String, onDismiss: () -> Unit) {
     val image = remember(url) {
         val matrix = com.google.zxing.MultiFormatWriter().encode(url, com.google.zxing.BarcodeFormat.QR_CODE, 640, 640)
         android.graphics.Bitmap.createBitmap(640, 640, android.graphics.Bitmap.Config.ARGB_8888).also { bitmap ->
-            for (x in 0 until 640) for (y in 0 until 640) bitmap.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            for (x in 0 until 640) for (y in 0 until 640) bitmap.setPixel(
+                x,
+                y,
+                if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+            )
         }.asImageBitmap()
     }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Add a device") }, text = { Column(horizontalAlignment = Alignment.CenterHorizontally) { Image(image, contentDescription = "BinderClip pairing code", modifier = Modifier.fillMaxWidth()) } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a device") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Image(
+                    image,
+                    contentDescription = "BinderClip pairing code",
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
 }

@@ -15,11 +15,31 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
+private val DebugLightColorScheme = lightColorScheme(
+    primary = androidx.compose.ui.graphics.Color(0xFF0066CC),
+    onPrimary = androidx.compose.ui.graphics.Color(0xFFFFFFFF),
+    primaryContainer = androidx.compose.ui.graphics.Color(0xFFD6E4FF),
+    onPrimaryContainer = androidx.compose.ui.graphics.Color(0xFF001C3D),
+    secondary = androidx.compose.ui.graphics.Color(0xFF007ACC),
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFFD0E4FF),
+)
+
+private val DebugDarkColorScheme = darkColorScheme(
+    primary = androidx.compose.ui.graphics.Color(0xFF99CBFF),
+    onPrimary = androidx.compose.ui.graphics.Color(0xFF00325B),
+    primaryContainer = androidx.compose.ui.graphics.Color(0xFF004880),
+    onPrimaryContainer = androidx.compose.ui.graphics.Color(0xFFD6E4FF),
+    secondary = androidx.compose.ui.graphics.Color(0xFF82B1FF),
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFF003B71),
+)
+
 @Composable
 fun BinderClipTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val dark = isSystemInDarkTheme()
     val colors = when {
+        BuildConfig.DEBUG && dark -> DebugDarkColorScheme
+        BuildConfig.DEBUG -> DebugLightColorScheme
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && dark -> dynamicDarkColorScheme(context)
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> dynamicLightColorScheme(context)
         dark -> darkColorScheme()

@@ -88,6 +88,14 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         guard let url = invitationProvider?(), let image = qr(url.absoluteString) else { return }
         imageView?.image = image
         expiresAt = Date().addingTimeInterval(300)
+        #if DEBUG
+        DiagnosticLog.shared.info("Pairing URL generated: \(url.absoluteString)")
+        print("[BinderClip Debug] Pairing URL: \(url.absoluteString)")
+        fflush(stdout)
+        let debugDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("net.wastu.binderclip", isDirectory: true)
+        try? FileManager.default.createDirectory(at: debugDir, withIntermediateDirectories: true)
+        try? url.absoluteString.write(to: debugDir.appendingPathComponent("debug-invite.txt"), atomically: true, encoding: .utf8)
+        #endif
         updateCountdown()
         stopTimer()
         let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateCountdown() }

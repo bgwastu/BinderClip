@@ -12,6 +12,15 @@ final class DirectCryptoTests: XCTestCase {
         XCTAssertEqual(opened["text"] as? String, "hello")
     }
 
+    func testOpenUrlPayloadRoundTrip() throws {
+        let key = Data(repeating: 7, count: 32)
+        let sealed = try DirectCrypto.seal(["type": "openUrl", "url": "https://example.com", "targetDeviceId": "remote-dev-123"], key: key)
+        let opened = try DirectCrypto.open(sealed, key: key)
+        XCTAssertEqual(opened["type"] as? String, "openUrl")
+        XCTAssertEqual(opened["url"] as? String, "https://example.com")
+        XCTAssertEqual(opened["targetDeviceId"] as? String, "remote-dev-123")
+    }
+
     func testTamperedPayloadIsRejected() throws {
         let key = Data(repeating: 9, count: 32)
         var sealed = try DirectCrypto.seal(["type": "hello"], key: key)

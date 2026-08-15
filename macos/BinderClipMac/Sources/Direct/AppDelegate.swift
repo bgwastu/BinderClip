@@ -9,7 +9,7 @@ import Sparkle
  FIRST VIEWPORT: the menu leads with live connection count, peers, then one pairing action.
  FORM: native menu-bar utility; compact operating panel rather than a dashboard.
 */
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
     private let transport = DirectTransport()
     private let clipboard = ClipboardBridge()
     private let pairing = PairingWindow()
@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
-        updaterDelegate: nil,
+        updaterDelegate: self,
         userDriverDelegate: nil
     )
     private var peers: [Peer] = [] { didSet { renderMenu() } }
@@ -153,5 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func checkForUpdates() {
         updaterController.checkForUpdates(nil)
+    }
+
+    func feedURLString(for updater: SPUUpdater) -> String? {
+        let base = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String
+            ?? "https://github.com/bgwastu/BinderClip/releases/latest/download/appcast.xml"
+        let timestamp = Int(Date().timeIntervalSince1970)
+        return "\(base)?t=\(timestamp)"
     }
 }

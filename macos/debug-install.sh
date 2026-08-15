@@ -51,16 +51,6 @@ if [[ -n "$SPARKLE_FRAMEWORK" && -d "$SPARKLE_FRAMEWORK" ]]; then
   install_name_tool -add_rpath '@loader_path/../Frameworks' "$STAGING_PATH/Contents/MacOS/BinderClip" 2>/dev/null || true
 fi
 
-WEBRTC_FRAMEWORK="$PACKAGE_DIR/.build/artifacts/webrtc/WebRTC/WebRTC.xcframework/macos-x86_64_arm64/WebRTC.framework"
-if [[ ! -d "$WEBRTC_FRAMEWORK" ]]; then
-  WEBRTC_FRAMEWORK="$(find "$PACKAGE_DIR/.build" -path "*macos*" -name "WebRTC.framework" -type d | head -n 1)"
-fi
-if [[ -n "$WEBRTC_FRAMEWORK" && -d "$WEBRTC_FRAMEWORK" ]]; then
-  mkdir -p "$STAGING_PATH/Contents/Frameworks"
-  ditto "$WEBRTC_FRAMEWORK" "$STAGING_PATH/Contents/Frameworks/WebRTC.framework"
-  install_name_tool -add_rpath '@loader_path/../Frameworks' "$STAGING_PATH/Contents/MacOS/BinderClip" 2>/dev/null || true
-fi
-
 cp "$PACKAGE_DIR/Resources/AppIcon.icns" "$STAGING_PATH/Contents/Resources/AppIcon.icns"
 cp "$PACKAGE_DIR/Resources/BinderClipMenuIcon.svg" "$STAGING_PATH/Contents/Resources/BinderClipMenuIcon.svg"
 

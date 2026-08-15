@@ -47,7 +47,6 @@ data class AppState(
 object AppRuntime {
     val state = kotlinx.coroutines.flow.MutableStateFlow(AppState())
     val pairingUrl = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    val pairingCode = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 }
 
 /** The only Android background component: a direct-connection foreground service. */
@@ -87,6 +86,7 @@ class BinderClipService : Service() {
     private val reconnectExecutor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val reconnectAttempts = AtomicInteger(0)
     private var scheduledReconnectFuture: ScheduledFuture<*>? = null
+    private var meshScanFuture: ScheduledFuture<*>? = null
     @Volatile
     private var uiVisible = false
     private var suppressClipboard: String? = null
@@ -124,7 +124,6 @@ class BinderClipService : Service() {
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         createChannel(); startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
         client = DirectClient(
-            context = this,
             store = store,
             deviceNameProvider = { DeviceNames.android(this) },
             onText = ::receiveText,
@@ -141,13 +140,8 @@ class BinderClipService : Service() {
             onRosterChanged = { publishState() },
             onInvite = { url -> AppRuntime.pairingUrl.value = url; updateStatus("Pairing code ready") },
             onDisconnected = ::scheduleReconnect,
-            onPairingCode = { code ->
-                AppRuntime.pairingCode.value = code
-                updateStatus("Show this code on the Mac to complete pairing")
-            },
         )
         server = DirectServer(
-            context = this,
             store = store,
             deviceNameProvider = { DeviceNames.android(this) },
             onText = ::receiveText,
@@ -166,6 +160,7 @@ class BinderClipService : Service() {
         AccessibilityClipboardBridge.onAvailabilityChanged = { executor.execute(::publishState) }
         registerNetworkCallback()
         startNsdDiscovery()
+        startMeshScan()
         val screenFilter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
@@ -352,6 +347,7 @@ class BinderClipService : Service() {
         runCatching { unregisterReceiver(screenStateReceiver) }
         stopNsdDiscovery()
         unregisterNetworkCallback()
+        stopMeshScan()
         AccessibilityClipboardBridge.onClipboard = null
         AccessibilityClipboardBridge.onAvailabilityChanged = null
         stopRootPolling(); server.stop(); client.shutdown(); executor.shutdownNow(); reconnectExecutor.shutdownNow(); super.onDestroy()
@@ -453,6 +449,24 @@ class BinderClipService : Service() {
             runCatching { nsdManager.stopServiceDiscovery(it) }
             nsdDiscoveryListener = null
         }
+    }
+
+    /**
+     * Periodic mesh re-scan: while paired but disconnected, retry reconnecting on
+     * a short cadence so a mesh/interface IP change heals automatically without
+     * user intervention.
+     */
+    private fun startMeshScan() {
+        if (meshScanFuture != null) return
+        meshScanFuture = reconnectExecutor.scheduleWithFixedDelay({
+            if (store.peer != null && !client.isConnected()) {
+                executor.execute { client.reconnect() }
+            }
+        }, 30, 30, TimeUnit.SECONDS)
+    }
+
+    private fun stopMeshScan() {
+        meshScanFuture?.cancel(true); meshScanFuture = null
     }
 
     private fun startRootPolling() {

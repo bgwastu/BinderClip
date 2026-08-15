@@ -129,8 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS"))
         menu.addItem(thisMac)
         for peer in peers {
-            let item = NSMenuItem(title: peer.name, action: nil, keyEquivalent: "")
+            let title = peer.connected ? peer.name : "\(peer.name) · reconnecting"
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
+            // Dim disconnected/reconnecting peers so connection truth is visible.
+            if !peer.connected {
+                item.isEnabled = false
+                let attributed = NSMutableAttributedString(string: title)
+                attributed.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: attributed.length))
+                item.attributedTitle = attributed
+            }
             item.submenu = deviceMenu(for: peer)
             menu.addItem(item)
         }
@@ -254,7 +262,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func showPairing() {
         peerCountBeforePairing = peers.count
-        pairing.onPeerCard = { [weak self] code in self?.transport.feedPeerAnswer(code) }
         pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
     }
     @objc private func createNewChain() {

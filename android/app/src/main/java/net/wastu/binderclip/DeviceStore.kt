@@ -22,7 +22,6 @@ data class RememberedPeer(
     val deviceId: String = "",
     val platform: String = "macOS",
     val connected: Boolean = false,
-    val webrtcCard: String = "",
 )
 
 object DeviceNames {
@@ -71,18 +70,12 @@ class DeviceStore(context: Context) {
     var peer: RememberedPeer?
         get() {
             val host = prefs.getString("peer_host", null) ?: return null
-            return RememberedPeer(
-                prefs.getString("peer_name", "Mac")!!, host, prefs.getInt("peer_port", 39_421),
-                prefs.getString("peer_id", "")!!, "macOS", true, prefs.getString("peer_webrtc_card", "") ?: "",
-            )
+            return RememberedPeer(prefs.getString("peer_name", "Mac")!!, host, prefs.getInt("peer_port", 39_421), prefs.getString("peer_id", "")!!)
         }
         set(value) = prefs.edit().apply {
             if (value == null) {
-                remove("peer_name"); remove("peer_host"); remove("peer_port"); remove("peer_id"); remove("peer_webrtc_card")
-            } else {
-                putString("peer_name", value.name); putString("peer_host", value.host); putInt("peer_port", value.port)
-                putString("peer_id", value.deviceId); putString("peer_webrtc_card", value.webrtcCard)
-            }
+                remove("peer_name"); remove("peer_host"); remove("peer_port"); remove("peer_id")
+            } else { putString("peer_name", value.name); putString("peer_host", value.host); putInt("peer_port", value.port); putString("peer_id", value.deviceId) }
         }.apply()
     var members: List<RememberedPeer>
         get() = runCatching {
@@ -97,7 +90,6 @@ class DeviceStore(context: Context) {
                         name = item.optString("name", "Device"), host = item.optString("host"),
                         port = item.optInt("port", 39_421), deviceId = id,
                         platform = item.optString("platform", "Android"), connected = item.optBoolean("connected"),
-                        webrtcCard = item.optString("webrtcCard", ""),
                     ))
                 }
             }
@@ -106,7 +98,6 @@ class DeviceStore(context: Context) {
             value.distinctBy { it.deviceId }.take(8).forEach { member -> put(JSONObject().apply {
                 put("id", member.deviceId); put("name", member.name); put("host", member.host)
                 put("port", member.port); put("platform", member.platform); put("connected", member.connected)
-                put("webrtcCard", member.webrtcCard)
             }) }
         }.toString()).apply()
 

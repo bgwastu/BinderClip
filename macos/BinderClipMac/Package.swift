@@ -8,15 +8,13 @@ let package = Package(
         .executable(name: "BinderClip", targets: ["BinderClip"])
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
-        .package(url: "https://github.com/stasel/WebRTC.git", from: "151.0.0")
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
     ],
     targets: [
         .executableTarget(
             name: "BinderClip",
             dependencies: [
-                .product(name: "Sparkle", package: "Sparkle"),
-                .product(name: "WebRTC", package: "WebRTC")
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             path: ".",
             exclude: ["Tests"],

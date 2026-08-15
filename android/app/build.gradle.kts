@@ -140,6 +140,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material")
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
@@ -151,7 +152,6 @@ dependencies {
     implementation("io.github.g00fy2.quickie:quickie-bundled:1.12.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("com.google.zxing:core:3.5.3")
-    implementation("io.github.webrtc-sdk:android:144.7559.12")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

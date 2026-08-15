@@ -9,9 +9,3 @@
 # Quickie bundles Google ML Kit barcode scanning, whose internals are resolved via
 # reflection and can be over-stripped by R8 full mode. Keep ML Kit to be safe.
 -keep class com.google.mlkit.** { *; }
-
-# WebRTC SDK (io.github.webrtc-sdk) relies on JNI callbacks from the native
-# jingle_peerconnection_so into Java. R8 full mode can strip the classes and
-# methods invoked from native code, so keep the public surface intact.
--keep class org.webrtc.** { *; }
--dontwarn org.webrtc.**

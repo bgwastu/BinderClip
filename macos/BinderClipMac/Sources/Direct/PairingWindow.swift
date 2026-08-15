@@ -10,9 +10,6 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     private var expiresAt = Date()
     private var timer: Timer?
 
-    var onPeerCard: ((String) -> Void)?
-    private var pasteField: NSTextField?
-
     func show(statusText: String = "Scan with BinderClip", invitationProvider: @escaping () -> URL?) {
         self.invitationProvider = invitationProvider
         if window == nil { buildWindow() }
@@ -79,30 +76,12 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         stack.alignment = .centerX
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 22, right: 24)
-
-        // Cross-network pairing: the phone shows its own code after scanning; paste
-        // it here so this Mac can complete the WebRTC handshake.
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        field.placeholderString = "Paste the device code shown on the phone…"
-        pasteField = field
-        let connect = NSButton(title: "Connect", target: self, action: #selector(connectTapped))
-        connect.keyEquivalent = "\r"
-        stack.addArrangedSubview(field)
-        stack.addArrangedSubview(connect)
-
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 348, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 348, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "BinderClip"
         panel.level = .floating
         panel.contentView = stack
         panel.delegate = self
         window = panel
-    }
-
-    @objc private func connectTapped() {
-        let code = pasteField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !code.isEmpty else { return }
-        onPeerCard?(code)
-        pasteField?.stringValue = ""
     }
 
     private func refreshInvite() {

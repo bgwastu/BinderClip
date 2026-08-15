@@ -45,6 +45,12 @@ jobs:
           if [ ! -x "$SPARKLE_BIN/generate_appcast" ]; then
             SPARKLE_BIN="macos/BinderClipMac/.build/artifacts/sparkle/Sparkle/bin"
           fi
+          if [ ! -x "$SPARKLE_BIN/generate_appcast" ]; then
+            FOUND_BIN="$(find macos/BinderClipMac/.build -name "generate_appcast" -type f -perm +111 2>/dev/null | head -n 1)"
+            if [ -n "$FOUND_BIN" ]; then
+              SPARKLE_BIN="$(dirname "$FOUND_BIN")"
+            fi
+          fi
           test -x "$SPARKLE_BIN/generate_appcast"
           mkdir -p appcast-input
           cp dist/BinderClip-*.zip appcast-input/

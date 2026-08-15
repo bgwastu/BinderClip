@@ -87,5 +87,5 @@ mkdir -p "$DMG_STAGING"
 cp -R "$APP_PATH" "$DMG_STAGING/BinderClip.app"
 ln -s /Applications "$DMG_STAGING/Applications"
 hdiutil create -volname "BinderClip $VERSION" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" >/dev/null
-rm -rf "$BUILD_ROOT" "$APP_PATH"
+rm -rf "$APP_PATH"
 print "Created $DMG_PATH"

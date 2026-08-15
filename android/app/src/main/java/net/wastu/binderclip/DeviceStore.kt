@@ -77,6 +77,17 @@ class DeviceStore(context: Context) {
                 remove("peer_name"); remove("peer_host"); remove("peer_port"); remove("peer_id")
             } else { putString("peer_name", value.name); putString("peer_host", value.host); putInt("peer_port", value.port); putString("peer_id", value.deviceId) }
         }.apply()
+
+    /** Alternate addresses for the primary peer (mesh + LAN + …) so reconnect can
+     *  fall back to a reachable route when one interface drops. */
+    var peerCandidates: List<String>
+        get() = prefs.getString("peer_candidates", "[]")?.let { raw ->
+            runCatching {
+                val a = JSONArray(raw)
+                buildList { for (i in 0 until a.length()) a.optString(i).takeIf { it.isNotBlank() }?.let(::add) }
+            }.getOrDefault(emptyList())
+        } ?: emptyList()
+        set(value) = prefs.edit().putString("peer_candidates", JSONArray(value).toString()).apply()
     var members: List<RememberedPeer>
         get() = runCatching {
             val raw = prefs.getString("members", "[]") ?: "[]"

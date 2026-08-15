@@ -71,7 +71,7 @@ class DirectClient(
         var failure: Exception? = null
         for (host in hosts) {
             try {
-                pair(host, port, id, inviteKey)
+                pair(host, port, id, inviteKey, hosts)
                 return
             } catch (error: Exception) {
                 Log.w("BinderClip", "Direct route $host failed", error)
@@ -85,7 +85,7 @@ class DirectClient(
         throw failure ?: IllegalStateException(message)
     }
 
-    private fun pair(host: String, port: Int, id: String, inviteKey: ByteArray) {
+    private fun pair(host: String, port: Int, id: String, inviteKey: ByteArray, allHosts: List<String> = listOf(host)) {
         val newSocket = Socket().apply {
             tcpNoDelay = true
             keepAlive = true
@@ -119,6 +119,9 @@ class DirectClient(
             RememberedPeer(welcome.optString("name", "Mac"), host, port, welcome.optString("deviceID"), "macOS", true)
         store.groupKey = groupKey; store.peer = pairedMac
         store.hosting = false
+        // Remember every address from the invite so reconnect can fall back to a
+        // reachable route when one interface (mesh/LAN) drops.
+        store.peerCandidates = allHosts.distinct().filter { it.isNotBlank() && it != host }
         val members = welcome.optJSONArray("members")?.let(::decodeMembers).orEmpty()
         store.upsertMembers(members + pairedMac)
         onRosterChanged(store.members)
@@ -133,9 +136,11 @@ class DirectClient(
         val key = store.groupKey ?: return
         close(); onStatus("Connecting to ${primaryPeer.name}…")
 
-        // Build unique candidate targets from peer and stored members
+        // Build unique candidate targets from peer, alternate peer addresses, and
+        // stored members (all routes the host may be reachable on).
         val candidateHosts = buildList {
             add(primaryPeer.host)
+            store.peerCandidates.forEach { add(it) }
             store.members.filter { it.platform == "macOS" }.forEach { add(it.host) }
         }.distinct().filter { it.isNotBlank() }
 
@@ -384,12 +389,19 @@ class DirectClient(
                             store.members = members
                             store.peer?.let { current ->
                                 members.firstOrNull { it.deviceId == current.deviceId }?.let { remote ->
-                                    store.peer = if (remote.host.isBlank()) current.copy(
+                                    // Keep the host that actually connected (a
+                                    // reachable route) instead of replacing it
+                                    // with the host's advertised (mesh-first) IP.
+                                    store.peer = current.copy(
                                         name = remote.name,
                                         platform = remote.platform,
                                         connected = true
                                     )
-                                    else remote.copy(connected = true)
+                                    // Remember every advertised host as an
+                                    // alternate reconnect route.
+                                    if (remote.host.isNotBlank() && remote.host != current.host) {
+                                        store.peerCandidates = (store.peerCandidates + remote.host).distinct()
+                                    }
                                 }
                             }
                             onRosterChanged(store.members)

@@ -338,7 +338,9 @@ private fun BinderClipScreen(
     val pairingUrl by AppRuntime.pairingUrl.collectAsState()
     val diagnosticEvents by DiagnosticLog.events.collectAsState()
     val devices = buildList {
-        addAll(state.members)
+        // Exclude synthetic alternate-host entries (used only as reconnect
+        // candidates) so they don't appear as duplicate devices in the list.
+        addAll(state.members.filter { !it.deviceId.contains('@') })
         state.peer?.let(::add)
         if ((state.peer != null || state.hosting) && none { it.deviceId == state.localDeviceId }) add(
             RememberedPeer(

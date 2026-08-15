@@ -147,6 +147,13 @@ class MainActivity : AppCompatActivity() {
                     },
                     onDisableAccessibility = { startService(BinderClipService.ACTION_DISABLE_ACCESSIBILITY) },
                     onRemove = { id -> startService(BinderClipService.ACTION_REMOVE_MEMBER, memberId = id) },
+                    onUpdateDeviceName = { memberId, name ->
+                        startService(
+                            BinderClipService.ACTION_UPDATE_DEVICE_NAME,
+                            memberId = memberId,
+                            deviceName = name
+                        )
+                    },
                 )
             }
         }
@@ -274,12 +281,14 @@ class MainActivity : AppCompatActivity() {
         action: String,
         visible: Boolean? = null,
         enabled: Boolean? = null,
-        memberId: String? = null
+        memberId: String? = null,
+        deviceName: String? = null,
     ) {
         ContextCompat.startForegroundService(this, Intent(this, BinderClipService::class.java).setAction(action).also {
             if (visible != null) it.putExtra("visible", visible)
             if (enabled != null) it.putExtra("enabled", enabled)
             if (memberId != null) it.putExtra(BinderClipService.EXTRA_MEMBER_ID, memberId)
+            if (deviceName != null) it.putExtra(BinderClipService.EXTRA_DEVICE_NAME, deviceName)
         })
     }
 }
@@ -306,6 +315,7 @@ private fun BinderClipScreen(
     onToggleRoot: (Boolean) -> Unit,
     onDisableAccessibility: () -> Unit,
     onRemove: (String) -> Unit,
+    onUpdateDeviceName: (String?, String?) -> Unit,
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -552,6 +562,8 @@ private fun BinderClipScreen(
             }
         }
     }
+    var deviceToRename by remember { mutableStateOf<RememberedPeer?>(null) }
+    var renameInput by remember { mutableStateOf("") }
     selectedDevice?.let { target ->
         val isCurrentDevice = target.deviceId == state.localDeviceId
         AlertDialog(
@@ -564,11 +576,48 @@ private fun BinderClipScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    onRemove(target.deviceId); selectedDevice = null
-                }) { Text("Remove From Chain") }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        renameInput = target.name
+                        deviceToRename = target
+                        selectedDevice = null
+                    }) { Text("Rename") }
+                    TextButton(onClick = {
+                        onRemove(target.deviceId); selectedDevice = null
+                    }) { Text("Remove From Chain") }
+                }
             },
             dismissButton = { TextButton(onClick = { selectedDevice = null }) { Text("Close") } },
+        )
+    }
+    deviceToRename?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deviceToRename = null },
+            title = { Text("Rename in Chain") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter a new name for this device across the chain:")
+                    androidx.compose.material3.OutlinedTextField(
+                        value = renameInput,
+                        onValueChange = { renameInput = it },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = renameInput.trim()
+                        if (trimmed.isNotEmpty()) {
+                            onUpdateDeviceName(target.deviceId, trimmed)
+                        }
+                        deviceToRename = null
+                    },
+                    enabled = renameInput.isNotBlank()
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { deviceToRename = null }) { Text("Cancel") } }
         )
     }
     pairingUrl?.let { url -> PairingCodeDialog(url) { AppRuntime.pairingUrl.value = null } }

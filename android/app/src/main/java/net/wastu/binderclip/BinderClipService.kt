@@ -60,11 +60,13 @@ class BinderClipService : Service() {
         const val ACTION_REFRESH_CAPABILITIES = "net.wastu.binderclip.REFRESH_CAPABILITIES"
         const val ACTION_DISABLE_ACCESSIBILITY = "net.wastu.binderclip.DISABLE_ACCESSIBILITY"
         const val ACTION_REMOVE_MEMBER = "net.wastu.binderclip.REMOVE_MEMBER"
+        const val ACTION_UPDATE_DEVICE_NAME = "net.wastu.binderclip.UPDATE_DEVICE_NAME"
         const val ACTION_SEND_SHARED = "net.wastu.binderclip.SEND_SHARED"
         const val ACTION_REQUEST_INVITE = "net.wastu.binderclip.REQUEST_INVITE"
         const val ACTION_SEARCH_RECONNECT = "net.wastu.binderclip.SEARCH_RECONNECT"
         const val EXTRA_MEMBER_ID = "member_id"
         const val EXTRA_TARGET_DEVICE_ID = "target_device_id"
+        const val EXTRA_DEVICE_NAME = "device_name"
         const val EXTRA_URI = "uri"
         private const val CHANNEL = "binderclip_sync"
         private const val URL_CHANNEL = "binderclip_urls"
@@ -119,7 +121,7 @@ class BinderClipService : Service() {
         createChannel(); startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
         client = DirectClient(
             store = store,
-            deviceName = DeviceNames.android(this),
+            deviceNameProvider = { DeviceNames.android(this) },
             onText = ::receiveText,
             onOpenUrl = ::receiveOpenUrl,
             onImage = ::receiveImage,
@@ -249,6 +251,17 @@ class BinderClipService : Service() {
 
             ACTION_REMOVE_MEMBER -> intent?.getStringExtra(EXTRA_MEMBER_ID)
                 ?.let { id -> executor.execute { client.removeMember(id) } }
+
+            ACTION_UPDATE_DEVICE_NAME -> {
+                val newName = intent?.getStringExtra(EXTRA_DEVICE_NAME)
+                val targetId = intent?.getStringExtra(EXTRA_MEMBER_ID) ?: store.deviceId
+                if (!newName.isNullOrBlank()) {
+                    executor.execute {
+                        client.renameMember(targetId, newName)
+                        publishState()
+                    }
+                }
+            }
 
             ACTION_DISABLE_ACCESSIBILITY -> {
                 val disabled = AccessibilityClipboardBridge.disable()

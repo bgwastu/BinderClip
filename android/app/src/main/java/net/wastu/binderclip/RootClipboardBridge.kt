@@ -30,28 +30,42 @@ object RootClipboardBridge {
         data class UnreadableImage(override val fingerprint: String) : Clip
     }
 
+    private fun getUserId(): Int = runCatching {
+        android.os.Process.myUid() / 100000
+    }.getOrDefault(0)
+
     fun isAvailable(): Boolean = runCatching {
         val process = ProcessBuilder("su", "-c", "id -u").redirectErrorStream(true).start()
         val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
-        process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0 &&
+        process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0 &&
             output.lines().any { it.trim() == "0" || it.contains("uid=0(") }
     }.getOrDefault(false)
 
     fun enableBackgroundAccess(context: Context): Boolean {
-        if (hasBackgroundAccess(context)) {
-            val pkg = shellQuote(context.packageName)
-            runRootCommand("cmd appops set $pkg READ_CLIPBOARD allow")
-            return true
-        }
         val pkg = shellQuote(context.packageName)
+        val userId = getUserId()
+
+        // Grant permission targeting the active user/space and fallback to global
+        runRootCommand("pm grant --user $userId $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
         runRootCommand("pm grant $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
+
+        // Set appops for the active user/space and fallback
+        runRootCommand("cmd appops set --user $userId $pkg READ_CLIPBOARD allow")
         runRootCommand("cmd appops set $pkg READ_CLIPBOARD allow")
-        return hasBackgroundAccess(context)
+
+        val granted = hasBackgroundAccess(context)
+        if (!granted) {
+            DiagnosticLog.warning("Background clipboard permission not granted after root commands (userId=$userId)")
+        }
+        return granted
     }
 
     fun revokeBackgroundAccess(context: Context) {
         val pkg = shellQuote(context.packageName)
+        val userId = getUserId()
+        runRootCommand("pm revoke --user $userId $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
         runRootCommand("pm revoke $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
+        runRootCommand("cmd appops set --user $userId $pkg READ_CLIPBOARD default")
         runRootCommand("cmd appops set $pkg READ_CLIPBOARD default")
     }
 
@@ -89,9 +103,17 @@ object RootClipboardBridge {
 
     private fun runRootCommand(command: String): Boolean = runCatching {
         val process = ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
-        process.inputStream.close()
-        process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0
-    }.getOrDefault(false)
+        val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
+        val finished = process.waitFor(5, TimeUnit.SECONDS)
+        val success = finished && process.exitValue() == 0
+        if (!success) {
+            DiagnosticLog.warning("Root command failed ($command): code=${if (finished) process.exitValue() else "timeout"}, out=${output.trim()}")
+        }
+        success
+    }.getOrElse {
+        DiagnosticLog.warning("Root command exception ($command): ${it.message}")
+        false
+    }
 
     private fun shellQuote(value: String) = "'${value.replace("'", "'\\''")}'"
 }

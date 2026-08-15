@@ -238,6 +238,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             details.addItem(sendToDevice)
         }
         details.addItem(.separator())
+        let rename = NSMenuItem(title: peer.id == transport.localDeviceID ? "Rename This Mac…" : "Rename Device…", action: #selector(renameDevice(_:)), keyEquivalent: "")
+        rename.target = self; rename.representedObject = peer.id; details.addItem(rename)
+        details.addItem(.separator())
         let remove = NSMenuItem(title: "Remove From Chain", action: #selector(removePeer(_:)), keyEquivalent: "")
         remove.target = self; remove.representedObject = peer.id; details.addItem(remove)
         return details
@@ -419,6 +422,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
     }
     @objc private func showLogs() { logWindow.showWindow(nil) }
+    @objc private func renameDevice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        let currentName = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
+        guard let currentName else { return }
+        let alert = NSAlert()
+        alert.messageText = id == transport.localDeviceID ? "Rename This Mac in Chain" : "Rename Device in Chain"
+        alert.informativeText = "Enter a new name for this device across the BinderClip chain:"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.stringValue = currentName
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !newName.isEmpty {
+                transport.renamePeer(id: id, newName: newName)
+            }
+        }
+    }
     @objc private func removePeer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         let name = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name

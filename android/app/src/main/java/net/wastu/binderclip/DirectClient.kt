@@ -15,7 +15,7 @@ import org.json.JSONObject
 
 class DirectClient(
     private val store: DeviceStore,
-    private val deviceName: String,
+    private val deviceNameProvider: () -> String,
     private val onText: (String) -> Unit,
     private val onOpenUrl: (String) -> Unit,
     private val onImage: (ImagePayload) -> Unit,
@@ -269,6 +269,26 @@ class DirectClient(
         }
     }
 
+    fun renameMember(deviceId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return
+        if (deviceId == store.deviceId) {
+            store.customDeviceName = trimmed
+            onRosterChanged(store.members)
+        } else {
+            store.members = store.members.map {
+                if (it.deviceId == deviceId) it.copy(name = trimmed) else it
+            }
+            if (store.peer?.deviceId == deviceId) {
+                store.peer = store.peer?.copy(name = trimmed)
+            }
+            onRosterChanged(store.members)
+        }
+        val key = store.groupKey ?: return
+        val out = output ?: return
+        write(out, DirectProtocol.seal(JSONObject().put("type", "rename").put("id", deviceId).put("name", trimmed), key))
+    }
+
     fun requestInvite() {
         val key = store.groupKey ?: return;
         val out = output ?: run { onStatus("Connect to add a device"); return }
@@ -369,6 +389,24 @@ class DirectClient(
                             }
                         }
 
+                        "rename" -> {
+                            val id = message.optString("id")
+                            val newName = message.optString("name").trim()
+                            if (id.isNotBlank() && newName.isNotBlank()) {
+                                if (id == store.deviceId) {
+                                    store.customDeviceName = newName
+                                } else {
+                                    store.members = store.members.map {
+                                        if (it.deviceId == id) it.copy(name = newName) else it
+                                    }
+                                    if (store.peer?.deviceId == id) {
+                                        store.peer = store.peer?.copy(name = newName)
+                                    }
+                                }
+                                onRosterChanged(store.members)
+                            }
+                        }
+
                         "invite" -> message.optString("url").takeIf { it.startsWith("binderclip://invite") }
                             ?.let(onInvite)
 
@@ -402,13 +440,19 @@ class DirectClient(
         }.apply { name = "BinderClip direct receiver"; isDaemon = true; start() }
     }
 
+    fun sendHelloBroadcast() {
+        if (connected.get()) {
+            sendHello()
+        }
+    }
+
     private fun sendHello() {
-        val key = store.groupKey ?: return;
+        val key = store.groupKey ?: return
         val out = output ?: return
         write(
             out,
             DirectProtocol.seal(
-                JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceName), key
+                JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceNameProvider()), key
             )
         )
     }

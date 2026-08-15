@@ -21,6 +21,15 @@ final class DirectCryptoTests: XCTestCase {
         XCTAssertEqual(opened["targetDeviceId"] as? String, "remote-dev-123")
     }
 
+    func testRenamePayloadRoundTrip() throws {
+        let key = Data(repeating: 7, count: 32)
+        let sealed = try DirectCrypto.seal(["type": "rename", "id": "device-456", "name": "Work Laptop"], key: key)
+        let opened = try DirectCrypto.open(sealed, key: key)
+        XCTAssertEqual(opened["type"] as? String, "rename")
+        XCTAssertEqual(opened["id"] as? String, "device-456")
+        XCTAssertEqual(opened["name"] as? String, "Work Laptop")
+    }
+
     func testTamperedPayloadIsRejected() throws {
         let key = Data(repeating: 9, count: 32)
         var sealed = try DirectCrypto.seal(["type": "hello"], key: key)

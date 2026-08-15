@@ -26,6 +26,8 @@ data class RememberedPeer(
 
 object DeviceNames {
     fun android(context: Context): String {
+        val custom = DeviceStore(context).customDeviceName
+        if (!custom.isNullOrBlank()) return custom.trim()
         val deviceName = runCatching {
             Settings.Global.getString(context.contentResolver, "device_name")?.trim().orEmpty()
         }.getOrDefault("")
@@ -48,6 +50,14 @@ object DeviceNames {
 /** Durable state; the group key is encrypted by a non-exportable Android Keystore key. */
 class DeviceStore(context: Context) {
     private val prefs = context.getSharedPreferences("binderclip", Context.MODE_PRIVATE)
+
+    var customDeviceName: String?
+        get() = prefs.getString("custom_device_name", null)?.takeIf { it.isNotBlank() }
+        set(value) = prefs.edit().apply {
+            val trimmed = value?.trim()
+            if (trimmed.isNullOrBlank()) remove("custom_device_name")
+            else putString("custom_device_name", trimmed)
+        }.apply()
 
     val deviceId: String
         get() = prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("device_id", it).apply() }
@@ -103,11 +113,17 @@ class DeviceStore(context: Context) {
     fun setRootClipboardAutomationEnabled(enabled: Boolean) { prefs.edit().putBoolean("root_clipboard_automation", enabled).apply() }
 
     fun reset() { prefs.edit().clear().apply() }
+
+    private fun keyAlias(): String {
+        val userId = android.os.Process.myUid() / 100000
+        return if (userId == 0) KEY_ALIAS else "$KEY_ALIAS.u$userId"
+    }
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        val alias = keyAlias()
+        (store.getKey(alias, null) as? SecretKey)?.let { return it }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)

@@ -71,7 +71,7 @@ final class DirectTransport {
     private let maximumInFlightImageChunks = 4
     private let secureStore = PrivateStateStore()
     private let localID: String
-    private let localName: String
+    private var localName: String
     private var listener: NWListener?
     private var pathMonitor: NWPathMonitor?
     private var heartbeatTimer: DispatchSourceTimer?
@@ -86,12 +86,51 @@ final class DirectTransport {
     var localEndpoint: DirectEndpoint { DirectEndpoint(host: Self.localAddresses().first ?? "unknown", port: Self.port) }
 
     init(localName: String = Host.current().localizedName ?? "Mac") {
-        self.localName = localName
+        if let savedName = UserDefaults.standard.string(forKey: "device.custom_name"), !savedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.localName = savedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            self.localName = localName
+        }
         if let saved = UserDefaults.standard.string(forKey: "device.id") { localID = saved }
         else { let id = UUID().uuidString; UserDefaults.standard.set(id, forKey: "device.id"); localID = id }
         if let existing = secureStore.data(account: "group-key") { groupKey = existing }
         else { let generated = DirectCrypto.randomBytes(count: 32); secureStore.set(generated, account: "group-key"); groupKey = generated }
         loadPeers()
+    }
+
+    func setLocalDeviceName(_ name: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let updatedName = trimmed.isEmpty ? (Host.current().localizedName ?? "Mac") : trimmed
+            self.localName = updatedName
+            if trimmed.isEmpty {
+                UserDefaults.standard.removeObject(forKey: "device.custom_name")
+            } else {
+                UserDefaults.standard.set(trimmed, forKey: "device.custom_name")
+            }
+            self.sendEncrypted(["type": "rename", "id": self.localID, "name": updatedName], only: nil)
+            self.publishPeers()
+            self.sendRoster(only: nil)
+        }
+    }
+
+    func renamePeer(id: String, newName: String) {
+        if id == localID {
+            setLocalDeviceName(newName)
+            return
+        }
+        queue.async { [weak self] in
+            guard let self else { return }
+            let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, var peer = self.peers[id] else { return }
+            peer.name = trimmed
+            self.peers[id] = peer
+            self.persistPeers()
+            self.publishPeers()
+            self.sendEncrypted(["type": "rename", "id": id, "name": trimmed], only: nil)
+            self.sendRoster(only: nil)
+        }
     }
 
     func start() {
@@ -384,6 +423,21 @@ final class DirectTransport {
         case "rosterRemove":
             guard let target = message["id"] as? String else { throw DirectCryptoError.malformed }
             removeFromChain(target, requestedBy: connection)
+        case "rename":
+            guard let targetID = message["id"] as? String, let newName = message["name"] as? String else { throw DirectCryptoError.malformed }
+            let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw DirectCryptoError.malformed }
+            if targetID == localID {
+                localName = trimmed
+                UserDefaults.standard.set(trimmed, forKey: "device.custom_name")
+                publishPeers()
+            } else if var peer = peers[targetID] {
+                peer.name = trimmed
+                peers[targetID] = peer
+                persistPeers()
+                publishPeers()
+            }
+            sendRoster(only: nil)
         case "inviteRequest":
             guard context.peerID != nil, let invite = createInviteLocked() else { throw DirectCryptoError.authentication }
             sendEncrypted(["type": "invite", "url": invite.absoluteString], only: connection)

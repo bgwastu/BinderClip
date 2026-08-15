@@ -28,6 +28,7 @@ class DirectClient(
     private val onRosterChanged: (List<RememberedPeer>) -> Unit,
     private val onInvite: (String) -> Unit,
     private val onDisconnected: () -> Unit,
+    private val onPairingCode: (String) -> Unit = {},
 ) {
     companion object {
         private const val MAX_IN_FLIGHT_IMAGE_CHUNKS = 4
@@ -73,11 +74,13 @@ class DirectClient(
         val inviteKey =
             Base64.getUrlDecoder().decode(parsed.getQueryParameter("key") ?: error("Pairing code has no key"))
         val hostCard = parsed.getQueryParameter("webrtc")
+        val hostSdp = parsed.getQueryParameter("webrtcSdp")
+        DiagnosticLog.info("pair(): hostCard=${hostCard != null}, hostSdp=${hostSdp?.length ?: 0}")
         close(); onStatus("Pairing with Mac…")
         var failure: Exception? = null
         for (host in hosts) {
             try {
-                pair(host, port, id, inviteKey)
+                pair(host, port, id, inviteKey, hostCard)
                 return
             } catch (error: Exception) {
                 Log.w("BinderClip", "Direct route $host failed", error)
@@ -86,11 +89,14 @@ class DirectClient(
                 close()
             }
         }
-        // Cross-network fallback: if the invite carries the host's WebRTC card
+        // Cross-network fallback: if the invite carries the host's WebRTC offer
         // and no TCP route reached it, pair over WebRTC (STUN/TURN) instead.
-        if (!hostCard.isNullOrBlank()) {
+        val webrtcOfferSdp = if (!hostSdp.isNullOrBlank()) {
+            runCatching { String(android.util.Base64.decode(hostSdp, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP), Charsets.UTF_8) }.getOrNull()
+        } else null
+        if (!hostCard.isNullOrBlank() || webrtcOfferSdp != null) {
             try {
-                if (pairOverWebRTC(hostCard, id, inviteKey)) return
+                if (pairOverWebRTC(hostCard, webrtcOfferSdp, id, inviteKey)) return
             } catch (error: Exception) {
                 Log.w("BinderClip", "WebRTC pairing failed", error)
                 failure = error
@@ -102,7 +108,7 @@ class DirectClient(
     }
 
     /** Pair over WebRTC alone using the host's card embedded in the invite. */
-    private fun pairOverWebRTC(hostCard: String, inviteId: String, inviteKey: ByteArray): Boolean {
+    private fun pairOverWebRTC(hostCard: String?, hostSdp: String?, inviteId: String, inviteKey: ByteArray): Boolean {
         onStatus("Pairing over WebRTC…")
         val transport = net.wastu.binderclip.webrtc.WebRTCTransport(context) { event ->
             when (event) {
@@ -112,35 +118,85 @@ class DirectClient(
                 else -> {}
             }
         }
+        // Handshake state: null until inviteAccepted, then the pair key.
+        val pairKeyRef = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
+        val adoptedKeyRef = java.util.concurrent.atomic.AtomicReference<ByteArray?>(null)
+        val pairedRef = java.util.concurrent.atomic.AtomicBoolean(false)
+        val clientNonce = DeviceStore.nonce()
+
         transport.onFrame = { frame ->
-            val key = store.groupKey
-            if (key != null) handleWebRTCFrame(frame, key)
-        }
-        transport.onDataChannelOpen = {
-            val key = store.groupKey
-            if (key != null) {
-                // Send our card back so the host completes its tango, then hello.
-                val card = transport.currentQRPayload()
-                if (card != null) {
-                    val sealed = DirectProtocol.seal(
-                        JSONObject().put("type", "webrtcCard").put("card", android.util.Base64.encodeToString(card, android.util.Base64.NO_WRAP)),
-                        key,
-                    )
-                    transport.send(DirectFrameCodec.encode(sealed.toString().toByteArray()))
+            try {
+                val raw = JSONObject(String(frame, Charsets.UTF_8))
+                if (raw.optString("type") == "inviteAccepted") {
+                    val serverNonce = raw.getString("nonce")
+                    require(
+                        DirectProtocol.constantTimeEquals(
+                            raw.getString("proof"),
+                            DirectProtocol.hmac(inviteKey, "server|$inviteId|$clientNonce|$serverNonce")
+                        )
+                    ) { "Mac authentication failed" }
+                    pairKeyRef.set(DirectProtocol.pairSessionKey(inviteKey, clientNonce, serverNonce))
+                } else {
+                    val pairKey = pairKeyRef.get()
+                    if (pairKey != null) {
+                        val welcome = DirectProtocol.open(raw, pairKey)
+                        require(welcome.optString("type") == "welcome") { "Invalid pairing reply" }
+                        val groupKey = android.util.Base64.decode(welcome.getString("groupKey"), android.util.Base64.NO_WRAP)
+                        adoptedKeyRef.set(groupKey)
+                        store.groupKey = groupKey
+                        val host = welcome.optString("name", "Mac")
+                        val hostId = welcome.optString("deviceID")
+                        store.peer = RememberedPeer(host, "webrtc", 0, hostId, "macOS", true, hostCard ?: "")
+                        store.hosting = false
+                        store.upsertMembers(decodeMembers(welcome.optJSONArray("members") ?: JSONArray()) + RememberedPeer(host, "webrtc", 0, hostId, "macOS", true))
+                        onRosterChanged(store.members)
+                        // Adopt the WebRTC channel as the live transport.
+                        val handler: (ByteArray) -> Unit = { f ->
+                            val key = store.groupKey
+                            if (key != null) handleWebRTCFrame(f, key)
+                        }
+                        webrtc = WebRTCUpgrade.fromExisting(context, transport, handler)
+                        transport.onFrame = handler
+                        val hello = DirectProtocol.seal(
+                            JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceNameProvider()).put("platform", "Android"), groupKey
+                        )
+                        transport.send(DirectFrameCodec.encode(hello.toString().toByteArray()))
+                        pairedRef.set(true)
+                    }
                 }
-                val hello = DirectProtocol.seal(
-                    JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceNameProvider()).put("platform", "Android"), key
-                )
-                transport.send(DirectFrameCodec.encode(hello.toString().toByteArray()))
+            } catch (error: Exception) {
+                Log.w("BinderClip", "WebRTC pairing handshake failed", error)
+                DiagnosticLog.error("WebRTC pairing failed: ${error.message ?: "handshake error"}")
             }
         }
-        transport.beginSession()
-        val hostPayload = android.util.Base64.decode(hostCard, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
-        transport.processScannedPayload(hostPayload)
-        // Wait up to ~12s for the DataChannel to open.
-        val deadline = System.currentTimeMillis() + 12_000
+        transport.onDataChannelOpen = {
+            // Send the cleartext invite to start the handshake.
+            val invite = JSONObject()
+                .put("type", "invite")
+                .put("id", inviteId)
+                .put("nonce", clientNonce)
+                .put("proof", DirectProtocol.hmac(inviteKey, "client|$inviteId|$clientNonce"))
+            transport.send(DirectFrameCodec.encode(invite.toString().toByteArray()))
+        }
+        // Use the SDP path (robust): the host's offer SDP is in the QR. We answer
+        // it and surface our answer so the Mac can complete the connection.
+        if (hostSdp != null) {
+            transport.beginSDPSession(createOffer = false)
+            transport.onAnswerReady = { answer ->
+                val b64 = android.util.Base64.encodeToString(answer.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                    .replace('+', '-').replace('/', '_').trimEnd('=')
+                DiagnosticLog.info("WebRTC pairing answer: $b64")
+                onPairingCode(b64)
+            }
+            transport.processRemoteOffer(hostSdp)
+        } else {
+            return false
+        }
+        // Wait up to ~60s for the pairing handshake to complete (the WebRTC
+        // tango may require the user to paste this device's code into the Mac).
+        val deadline = System.currentTimeMillis() + 60_000
         while (System.currentTimeMillis() < deadline) {
-            if (transport.isOpen) {
+            if (pairedRef.get()) {
                 onStatus("Paired and connected")
                 return true
             }
@@ -150,7 +206,7 @@ class DirectClient(
         return false
     }
 
-    private fun pair(host: String, port: Int, id: String, inviteKey: ByteArray) {
+    private fun pair(host: String, port: Int, id: String, inviteKey: ByteArray, webrtcCard: String? = null) {
         val newSocket = Socket().apply {
             tcpNoDelay = true
             keepAlive = true
@@ -181,7 +237,7 @@ class DirectClient(
         require(welcome.optString("type") == "welcome") { "Invalid pairing reply" }
         val groupKey = android.util.Base64.decode(welcome.getString("groupKey"), android.util.Base64.NO_WRAP)
         val pairedMac =
-            RememberedPeer(welcome.optString("name", "Mac"), host, port, welcome.optString("deviceID"), "macOS", true)
+            RememberedPeer(welcome.optString("name", "Mac"), host, port, welcome.optString("deviceID"), "macOS", true, webrtcCard ?: "")
         store.groupKey = groupKey; store.peer = pairedMac
         store.hosting = false
         val members = welcome.optJSONArray("members")?.let(::decodeMembers).orEmpty()
@@ -197,6 +253,20 @@ class DirectClient(
         val primaryPeer = store.peer ?: store.members.firstOrNull { it.platform == "macOS" } ?: return
         val key = store.groupKey ?: return
         close(); onStatus("Connecting to ${primaryPeer.name}…")
+
+        // WebRTC-first: if we have the host's WebRTC card, try it before TCP so
+        // reconnects work across networks (STUN/TURN) even when the LAN/mesh TCP
+        // route is gone.
+        val hostCard = primaryPeer.webrtcCard
+            .ifBlank { store.members.firstOrNull { it.platform == "macOS" }?.webrtcCard.orEmpty() }
+        if (hostCard.isNotBlank()) {
+            try {
+                if (reconnectOverWebRTC(hostCard, key)) return
+            } catch (error: Exception) {
+                Log.w("BinderClip", "WebRTC reconnect failed", error)
+                DiagnosticLog.warning("WebRTC reconnect failed, falling back to TCP")
+            }
+        }
 
         // Build unique candidate targets from peer and stored members
         val candidateHosts = buildList {
@@ -260,6 +330,49 @@ class DirectClient(
             onStatus("Waiting for ${primaryPeer.name}")
             onDisconnected()
         }
+    }
+
+    /** Reconnect over WebRTC using the stored host card (already paired). */
+    private fun reconnectOverWebRTC(hostCard: String, key: ByteArray): Boolean {
+        onStatus("Connecting over WebRTC…")
+        val transport = net.wastu.binderclip.webrtc.WebRTCTransport(context) { event ->
+            when (event) {
+                is net.wastu.binderclip.webrtc.WebRTCTransportEvent.Log -> DiagnosticLog.info(event.message)
+                is net.wastu.binderclip.webrtc.WebRTCTransportEvent.Connected -> DiagnosticLog.info("WebRTC connected")
+                is net.wastu.binderclip.webrtc.WebRTCTransportEvent.Disconnected -> DiagnosticLog.warning("WebRTC disconnected")
+                else -> {}
+            }
+        }
+        val connectedRef = java.util.concurrent.atomic.AtomicBoolean(false)
+        val handler: (ByteArray) -> Unit = { f ->
+            val k = store.groupKey
+            if (k != null) handleWebRTCFrame(f, k)
+        }
+        transport.onFrame = handler
+        transport.onDataChannelOpen = {
+            val k = store.groupKey
+            if (k != null) {
+                val hello = DirectProtocol.seal(
+                    JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceNameProvider()).put("platform", "Android"), k
+                )
+                transport.send(DirectFrameCodec.encode(hello.toString().toByteArray()))
+                connectedRef.set(true)
+            }
+        }
+        webrtc = WebRTCUpgrade.fromExisting(context, transport, handler)
+        transport.beginSession()
+        val hostPayload = android.util.Base64.decode(hostCard, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP)
+        transport.processScannedPayload(hostPayload)
+        val deadline = System.currentTimeMillis() + 12_000
+        while (System.currentTimeMillis() < deadline) {
+            if (connectedRef.get()) {
+                onStatus("Connected")
+                return true
+            }
+            Thread.sleep(200)
+        }
+        transport.close()
+        return false
     }
 
     fun sendText(text: String, targetDeviceId: String? = null) {
@@ -391,7 +504,9 @@ class DirectClient(
         write(out, DirectProtocol.seal(JSONObject().put("type", "inviteRequest"), key))
     }
 
-    fun isConnected(): Boolean = connected.get()
+    /** True when either the TCP socket or the WebRTC DataChannel is live. */
+    fun isConnected(): Boolean = connected.get() || (webrtc?.isLive == true)
+    fun isWebRTCConnected(): Boolean = webrtc?.isLive == true
     fun close() {
         outboundTimeout?.cancel(false); outboundTimeout = null
         watchdogTask?.cancel(false); watchdogTask = null

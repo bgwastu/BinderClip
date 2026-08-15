@@ -47,6 +47,7 @@ data class AppState(
 object AppRuntime {
     val state = kotlinx.coroutines.flow.MutableStateFlow(AppState())
     val pairingUrl = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val pairingCode = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 }
 
 /** The only Android background component: a direct-connection foreground service. */
@@ -140,6 +141,10 @@ class BinderClipService : Service() {
             onRosterChanged = { publishState() },
             onInvite = { url -> AppRuntime.pairingUrl.value = url; updateStatus("Pairing code ready") },
             onDisconnected = ::scheduleReconnect,
+            onPairingCode = { code ->
+                AppRuntime.pairingCode.value = code
+                updateStatus("Show this code on the Mac to complete pairing")
+            },
         )
         server = DirectServer(
             context = this,
@@ -209,22 +214,24 @@ class BinderClipService : Service() {
                     when (val shared = SharedPayloadCache.value.also { SharedPayloadCache.value = null }) {
                         is SharedPayload.Image -> sendSharedImage(shared.value)
                         is SharedPayload.Text -> {
-                            applyText(shared.value)
+                            val trimmed = shared.value.trim()
+                            val isUrl = isWebUrl(trimmed)
+                            // URLs are sent to be OPENED on the target device; only
+                            // non-URL text is mirrored into the local clipboard.
+                            if (!isUrl) applyText(shared.value)
                             if (store.hosting) {
-                                if (!server.isRunning) reportFailure("Content copied, but hosting is not active")
+                                if (!server.isRunning) reportFailure(if (isUrl) "Link not sent — hosting is not active" else "Content copied, but hosting is not active")
                                 else {
                                     lastSentText = shared.value
                                     lastSendAt = System.currentTimeMillis()
-                                    val trimmed = shared.value.trim()
-                                    if (isWebUrl(trimmed)) server.broadcastOpenUrl(trimmed, targetDeviceId)
+                                    if (isUrl) server.broadcastOpenUrl(trimmed, targetDeviceId)
                                     else server.broadcastText(shared.value, targetDeviceId)
                                 }
                             } else if (!client.isConnected()) client.reconnect()
                             else {
                                 lastSentText = shared.value
                                 lastSendAt = System.currentTimeMillis()
-                                val trimmed = shared.value.trim()
-                                if (isWebUrl(trimmed)) {
+                                if (isUrl) {
                                     client.sendOpenUrl(trimmed, targetDeviceId)
                                 } else {
                                     client.sendText(shared.value, targetDeviceId)
@@ -483,6 +490,12 @@ class BinderClipService : Service() {
 
     private fun scheduleReconnect() {
         if (store.peer == null || client.isConnected()) return
+        // Reflect the loss immediately: no stale "connected" in the UI.
+        if (reconnectAttempts.get() == 0) {
+            store.members = store.members.map { if (it.deviceId != store.deviceId) it.copy(connected = false) else it }
+            store.peer = store.peer?.copy(connected = false)
+            publishState()
+        }
         val attempts = reconnectAttempts.getAndIncrement()
         val baseDelay = when (attempts) {
             0 -> 3L

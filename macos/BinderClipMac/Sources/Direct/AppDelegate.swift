@@ -254,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func showPairing() {
         peerCountBeforePairing = peers.count
+        pairing.onPeerCard = { [weak self] code in self?.transport.feedPeerAnswer(code) }
         pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
     }
     @objc private func createNewChain() {

@@ -86,6 +86,14 @@ final class WebRTCTransport: NSObject {
         }
     }
 
+    /// The current local offer SDP (with any gathered candidates), or nil.
+    func localOfferSDP() -> String? {
+        stateQueue.sync {
+            guard let pc = peerConnection, let sdp = pc.localDescription?.sdp else { return nil }
+            return sdp
+        }
+    }
+
     private func makeQRPayload(from pc: RTCPeerConnection) -> Data? {
         guard let sdp = pc.localDescription?.sdp else { return nil }
         let fp = sdp.fingerprint()
@@ -190,19 +198,24 @@ final class WebRTCTransport: NSObject {
             guard createOffer else { return }
             pc.offer(for: Self.emptyConstraints()) { [weak self, weak pc] sdp, error in
                 guard let self, let pc, let sdp else {
+                    DirectTransportDebug.log("createOffer failed: \(error?.localizedDescription ?? "nil")")
                     self?.emit(.log("createOffer failed: \(error?.localizedDescription ?? "nil")"))
                     return
                 }
+                DirectTransportDebug.log("offer created, setting local")
                 pc.setLocalDescription(sdp) { [weak self, weak pc] error in
                     guard let self, let pc else { return }
                     if error == nil {
+                        DirectTransportDebug.log("local offer set, waiting for gathering")
                         // Wait for ICE gathering to finish so the offer carries
                         // candidates; then expose it.
                         self.waitForGathering(pc) {
+                            DirectTransportDebug.log("gathering complete, offer ready")
                             let finalSDP = pc.localDescription?.sdp ?? sdp.sdp
                             self.onLocalOffer?(finalSDP)
                         }
                     } else {
+                        DirectTransportDebug.log("setLocalDescription failed: \(error?.localizedDescription ?? "unknown")")
                         self.emit(.log("setLocalDescription failed: \(error?.localizedDescription ?? "unknown")"))
                     }
                 }

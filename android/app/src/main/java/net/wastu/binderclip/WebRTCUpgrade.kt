@@ -27,6 +27,17 @@ class WebRTCUpgrade(
     /** True when this device should send the SDP offer (smaller device ID). */
     var amOfferer: Boolean = true
 
+    companion object {
+        /** Wrap an already-connected transport (pure-WebRTC pairing path). */
+        fun fromExisting(context: Context, existing: WebRTCTransport, onFrame: (ByteArray) -> Unit): WebRTCUpgrade {
+            val upgrade = WebRTCUpgrade(context, { it }, { _ -> }, onFrame)
+            upgrade.transport = existing
+            upgrade.started.set(true)
+            existing.onFrame = onFrame
+            return upgrade
+        }
+    }
+
     /** Start the upgrade (idempotent). */
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -80,6 +91,10 @@ class WebRTCUpgrade(
         }
         transport?.processScannedPayload(payload)
     }
+
+    /** True when the underlying WebRTC DataChannel is open. */
+    val isLive: Boolean
+        get() = transport?.isOpen == true
 
     /** Send an already-framed encrypted payload over WebRTC when the channel is open. */
     fun sendFrame(frame: ByteArray): Boolean {

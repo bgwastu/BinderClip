@@ -641,6 +641,38 @@ private fun BinderClipScreen(
         )
     }
     pairingUrl?.let { url -> PairingCodeDialog(url, state, onConnected = { AppRuntime.pairingUrl.value = null }) }
+    val pairingCode = AppRuntime.pairingCode.collectAsState().value
+    pairingCode?.let { code ->
+        AlertDialog(
+            onDismissRequest = { AppRuntime.pairingCode.value = null },
+            title = { Text("Finish pairing on your Mac") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "Open BinderClip on your Mac, click \"Add Device\", and paste this code into the \"Paste the device code shown on the phone\" field. This lets the two devices connect securely over the internet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        code,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small)
+                            .padding(10.dp),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(onClick = {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("BinderClip code", code))
+                        android.widget.Toast.makeText(context, "Code copied — paste it into the Mac's Add Device window", android.widget.Toast.LENGTH_SHORT).show()
+                    }) { Text("Copy code") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { AppRuntime.pairingCode.value = null }) { Text("Done") } },
+        )
+    }
     if (showLogs) {
         var logQuery by remember { mutableStateOf("") }
         var selectedFilter by remember { mutableStateOf<DiagnosticLevel?>(null) }

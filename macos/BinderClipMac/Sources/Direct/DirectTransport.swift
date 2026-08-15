@@ -83,6 +83,7 @@ final class DirectTransport {
     private var invites: [UUID: Invite] = [:]
     private var groupKey: Data
     private let webrtcQueue = DispatchQueue(label: "net.wastu.binderclip.webrtc.upgrade")
+    private var webrtcInviteSession: WebRTCTransport?
     var localDeviceID: String { localID }
     var localDeviceName: String { localName }
     var localEndpoint: DirectEndpoint { DirectEndpoint(host: Self.localAddresses().first ?? "unknown", port: Self.port) }
@@ -436,7 +437,44 @@ final class DirectTransport {
             .init(name: "port", value: String(Self.port)),
             .init(name: "id", value: id.uuidString), .init(name: "key", value: Self.urlSafeBase64(key)),
         ]
+        // Embed the host's WebRTC offer SDP so a joiner that cannot reach the
+        // LAN/mesh TCP port can still pair over STUN/TURN (different networks).
+        if let sdp = webrtcInviteOfferSDP() {
+            components.queryItems?.append(URLQueryItem(name: "webrtcSdp", value: Self.urlSafeBase64(sdp)))
+        }
         return components.url
+    }
+
+    /// Ensure a host-side WebRTC session is running and return its gathered offer
+    /// SDP (with candidates) once ready, or nil if unavailable. This session is
+    /// the inbound WebRTC endpoint that pairs with a joiner who scans this invite.
+    private func webrtcInviteOfferSDP() -> Data? {
+        var offer: Data?
+        webrtcQueue.sync {
+            if webrtcInviteSession == nil {
+                let t = WebRTCTransport()
+                webrtcInviteSession = t
+                t.onEvent = { [weak self] event in
+                    self?.handle(webrtcEvent: event, transport: t)
+                }
+                t.onFrame = { [weak self] frame in
+                    self?.handleWebRTCFrame(frame, connection: nil)
+                }
+                t.beginSession()
+            }
+            let deadline = Date().addingTimeInterval(16)
+            while Date() < deadline {
+                if let sdp = webrtcInviteSession?.localOfferSDP(), sdp.contains("a=candidate:") {
+                    offer = Data(sdp.utf8)
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+        }
+        #if DEBUG
+        DirectTransportDebug.log("webrtcInviteOfferSDP -> \(offer != nil ? "sdp(\(offer!.count))" : "nil")")
+        #endif
+        return offer
     }
 
     func sendClipboard(_ text: String, targetDeviceId: String? = nil) {
@@ -450,7 +488,9 @@ final class DirectTransport {
                 guard let peerID = self.contexts[ObjectIdentifier(connection)]?.peerID else { return false }
                 return targetDeviceId == nil || peerID == targetDeviceId
             }
-            guard !targetConnections.isEmpty else {
+            // A pure-WebRTC peer has no TCP connection but is still reachable.
+            let hasWebRTCPeer = self.webrtcInviteSession?.isOpen == true
+            guard !targetConnections.isEmpty || hasWebRTCPeer else {
                 self.transferStatus("Clipboard not sent — no connected device")
                 return
             }
@@ -477,7 +517,8 @@ final class DirectTransport {
                 guard let peerID = self.contexts[ObjectIdentifier(connection)]?.peerID else { return false }
                 return targetDeviceId == nil || peerID == targetDeviceId
             }
-            guard !targetConnections.isEmpty else {
+            let hasWebRTCPeer = self.webrtcInviteSession?.isOpen == true
+            guard !targetConnections.isEmpty || hasWebRTCPeer else {
                 self.transferStatus("URL not sent — no connected device")
                 return
             }
@@ -875,6 +916,37 @@ final class DirectTransport {
         }
     }
 
+    /// Feed a peer's WebRTC answer SDP (base64url) to the host's invite session so
+    /// the connection completes for cross-network pairing. Creates the session on
+    /// demand (the host is the offerer and has its local offer set).
+    func feedPeerAnswer(_ answerBase64: String) {
+        webrtcQueue.async { [weak self] in
+            guard let self else { return }
+            let padded = answerBase64
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let paddedWithEquals = padded + String(repeating: "=", count: (4 - padded.count % 4) % 4)
+            guard let data = Data(base64Encoded: paddedWithEquals, options: [.ignoreUnknownCharacters]),
+                  let sdp = String(data: data, encoding: .utf8) else { return }
+            if self.webrtcInviteSession == nil {
+                let t = WebRTCTransport()
+                self.webrtcInviteSession = t
+                t.onEvent = { [weak self] event in
+                    self?.handle(webrtcEvent: event, transport: t)
+                }
+                t.onFrame = { [weak self] frame in
+                    self?.handleWebRTCFrame(frame, connection: nil)
+                }
+                t.beginSDPSession(createOffer: true)
+            }
+            guard let session = self.webrtcInviteSession else { return }
+            #if DEBUG
+            Self.debugLog("feedPeerAnswer feeding invite session, sdp=\(sdp.count) bytes")
+            #endif
+            session.processRemoteAnswer(sdp)
+        }
+    }
+
     private static func debugLog(_ message: String) {
         DirectTransportDebug.log(message)
     }
@@ -888,6 +960,12 @@ final class DirectTransport {
             guard let self else { return }
             guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
                 self.log("Rejected WebRTC frame (not JSON)", level: .error)
+                return
+            }
+            // Pre-pairing handshake: the first frame from a joining device over a
+            // fresh WebRTC channel is a CLEARTEXT "invite" (no group key yet).
+            if (object["type"] as? String) == "invite" {
+                self.handleWebRTCInvite(object)
                 return
             }
             guard let message = try? DirectCrypto.open(object, key: self.groupKey) else {
@@ -911,6 +989,39 @@ final class DirectTransport {
         }
     }
 
+    /// Handle an inbound `invite` over the host's WebRTC pairing channel. Replies
+    /// flow back over the same DataChannel (via webrtcInviteSession).
+    private func handleWebRTCInvite(_ object: [String: Any]) {
+        guard let rawID = object["id"] as? String, let id = UUID(uuidString: rawID),
+              let invite = invites.removeValue(forKey: id), invite.expiresAt > Date(),
+              let nonce = object["nonce"] as? String, let proof = object["proof"] as? String,
+              DirectCrypto.constantTimeEqual(proof, DirectCrypto.hmac(key: invite.key, value: "client|\(rawID)|\(nonce)")) else {
+            log("Rejected WebRTC invite (bad proof/expired)", level: .warning)
+            return
+        }
+        let serverNonce = DirectCrypto.randomBytes(count: 16).base64EncodedString()
+        let serverProof = DirectCrypto.hmac(key: invite.key, value: "server|\(rawID)|\(nonce)|\(serverNonce)")
+        let pairKey = DirectCrypto.pairSessionKey(inviteKey: invite.key, clientNonce: nonce, serverNonce: serverNonce)
+        guard let welcome = try? DirectCrypto.seal(
+            ["type": "welcome", "groupKey": groupKey.base64EncodedString(), "deviceID": localID, "name": localName, "members": rosterPayload()],
+            key: pairKey
+        ), let body = try? JSONSerialization.data(withJSONObject: welcome, options: [.sortedKeys]),
+           let welcomeFrame = try? FrameCodec.encode(body) else {
+            log("Could not build WebRTC welcome", level: .error)
+            return
+        }
+        // inviteAccepted (cleartext), then sealed welcome — both over WebRTC.
+        webrtcQueue.async { [weak self] in
+            guard let self, let session = self.webrtcInviteSession else { return }
+            if let accepted = try? JSONSerialization.data(withJSONObject: ["type": "inviteAccepted", "nonce": serverNonce, "proof": serverProof], options: [.sortedKeys]),
+               let acceptedFrame = try? FrameCodec.encode(accepted) {
+                session.send(acceptedFrame)
+            }
+            session.send(welcomeFrame)
+        }
+        // Once the peer hello arrives over the channel, it will be learned as a peer.
+    }
+
     private func handleDecryptedWebRTCMessage(_ message: [String: Any], context: Context, connection: NWConnection?) throws {
         switch message["type"] as? String {
         case "clipboard":
@@ -932,10 +1043,10 @@ final class DirectTransport {
                                       endpoint: DirectEndpoint(host: "webrtc", port: Self.port),
                                       connected: true, platform: message["platform"] as? String ?? "Android")
                 self.persistPeers(); self.publishPeers()
-                self.webrtcSend(["type": "hello", "deviceID": self.localID, "name": self.localName, "platform": "macOS"])
+                self.webrtcSendOrInvite(["type": "hello", "deviceID": self.localID, "name": self.localName, "platform": "macOS"], connection: connection)
             }
         case "ping":
-            self.webrtcSend(["type": "pong"])
+            self.webrtcSendOrInvite(["type": "pong"], connection: connection)
         // Media messages reuse the same per-peer window/ACK logic as TCP.
         case "mediaOffer", "mediaAccept", "mediaChunk", "mediaAck", "mediaComplete":
             guard let connection else { break }
@@ -1027,6 +1138,32 @@ final class DirectTransport {
                     webrtc.send(frame)
                     delivered = true
                 }
+            }
+            // Also reach a pure-WebRTC paired peer (no TCP connection).
+            if let invite = webrtcInviteSession, invite.isOpen {
+                invite.send(frame)
+                delivered = true
+            }
+        }
+        return delivered
+    }
+
+    /// Send an encrypted frame over the given connection's WebRTC session, or
+    /// over the invite session when no TCP connection backs it (pure WebRTC
+    /// pairing path).
+    @discardableResult
+    private func webrtcSendOrInvite(_ object: [String: Any], connection: NWConnection?) -> Bool {
+        guard let sealed = try? DirectCrypto.seal(object, key: groupKey),
+              let body = try? JSONSerialization.data(withJSONObject: sealed, options: [.sortedKeys]),
+              let frame = try? FrameCodec.encode(body) else { return false }
+        var delivered = false
+        webrtcQueue.sync {
+            if let connection, let context = contexts[ObjectIdentifier(connection)], let webrtc = context.webrtc, webrtc.isOpen {
+                webrtc.send(frame)
+                delivered = true
+            } else if let invite = webrtcInviteSession, invite.isOpen {
+                invite.send(frame)
+                delivered = true
             }
         }
         return delivered

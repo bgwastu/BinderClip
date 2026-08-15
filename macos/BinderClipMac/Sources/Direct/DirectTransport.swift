@@ -49,6 +49,7 @@ final class DirectTransport {
         var outboundImage: OutboundImage?
         var outboundTimeout: DispatchWorkItem?
         var receiveStarted = false
+        var lastActivity = Date()
     }
     private final class InboundImage {
         let id: UUID; let wireID: String; let mimeType: String; let expectedBytes: Int; let expectedHash: String
@@ -71,6 +72,9 @@ final class DirectTransport {
     private let localID: String
     private let localName: String
     private var listener: NWListener?
+    private var pathMonitor: NWPathMonitor?
+    private var heartbeatTimer: DispatchSourceTimer?
+    private var recentMessageIDs: [String] = []
     private var contexts: [ObjectIdentifier: Context] = [:]
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var peers: [String: Peer] = [:]
@@ -94,6 +98,8 @@ final class DirectTransport {
             guard let self, self.listener == nil else { return }
             do {
                 let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+                let txtData = "id=\(self.localID)".data(using: .utf8)
+                listener.service = NWListener.Service(name: self.localName, type: "_binderclip._tcp", domain: nil, txtRecord: txtData)
                 listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
                 listener.stateUpdateHandler = { [weak self] state in
                     switch state {
@@ -108,9 +114,47 @@ final class DirectTransport {
                 }
                 self.listener = listener
                 listener.start(queue: self.queue)
-                self.log("Listening for direct connections")
+                self.startPathMonitor()
+                self.startHeartbeats()
+                self.log("Listening for direct connections with Bonjour discovery")
             } catch { self.log("Could not listen: \(error.localizedDescription)") }
         }
+    }
+
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            self.queue.async {
+                if path.status == .satisfied {
+                    self.sendRoster(only: nil)
+                }
+            }
+        }
+        monitor.start(queue: queue)
+        pathMonitor = monitor
+    }
+
+    private func startHeartbeats() {
+        guard heartbeatTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = Date()
+            for (id, connection) in self.connections {
+                guard let context = self.contexts[id], context.peerID != nil else { continue }
+                if now.timeIntervalSince(context.lastActivity) > 45 {
+                    self.log("Closing unresponsive peer connection", level: .warning)
+                    self.close(connection)
+                } else {
+                    self.sendEncrypted(["type": "ping", "timestamp": UInt64(now.timeIntervalSince1970 * 1000)], only: connection)
+                }
+            }
+        }
+        timer.resume()
+        heartbeatTimer = timer
     }
 
     private static func isPermissionError(_ error: NWError) -> Bool {
@@ -120,6 +164,8 @@ final class DirectTransport {
 
     func stop() {
         queue.async { [weak self] in
+            self?.heartbeatTimer?.cancel(); self?.heartbeatTimer = nil
+            self?.pathMonitor?.cancel(); self?.pathMonitor = nil
             self?.connections.values.forEach { $0.cancel() }
             self?.connections.removeAll(); self?.contexts.removeAll(); self?.listener?.cancel(); self?.listener = nil
         }
@@ -225,6 +271,7 @@ final class DirectTransport {
         guard let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else { throw DirectCryptoError.malformed }
         if object["type"] as? String == "invite" { try handleInvite(object, connection: connection, context: context); return }
         let message = try DirectCrypto.open(object, key: groupKey)
+        context.lastActivity = Date()
         switch message["type"] as? String {
         case "hello":
             guard let id = message["deviceID"] as? String, let name = message["name"] as? String,
@@ -246,8 +293,17 @@ final class DirectTransport {
             }
         case "clipboard":
             guard let text = message["text"] as? String, text.utf8.count <= Self.maximumTextBytes else { throw DirectCryptoError.malformed }
+            if let msgID = message["id"] as? String {
+                if recentMessageIDs.contains(msgID) { return }
+                recentMessageIDs.append(msgID)
+                if recentMessageIDs.count > 64 { recentMessageIDs.removeFirst() }
+            }
             log("Received clipboard text")
             onClipboard?(text)
+        case "ping":
+            sendEncrypted(["type": "pong"], only: connection)
+        case "pong":
+            break
         case "mediaOffer": try handleMediaOffer(message, connection: connection, context: context)
         case "mediaAccept": try handleMediaAccept(message, connection: connection, context: context)
         case "mediaChunk": try handleMediaChunk(message, connection: connection, context: context)

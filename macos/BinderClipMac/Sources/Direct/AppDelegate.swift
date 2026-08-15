@@ -1,6 +1,7 @@
 import AppKit
 import ServiceManagement
 import Sparkle
+import UserNotifications
 
 /*
  THESIS: a private clipboard group is operated from one quiet menu, never a settings maze.
@@ -20,16 +21,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         updaterDelegate: self,
         userDriverDelegate: nil
     )
-    private var peers: [Peer] = [] { didSet { renderMenu() } }
-    private var status = "Listening" { didSet { renderMenu() } }
+    private var peers: [Peer] = [] { didSet { renderMenu(); updateStatusIcon() } }
+    private var status = "Listening" { didSet { renderMenu(); updateStatusIcon() } }
     private var localNetworkPermissionRequired = false { didSet { renderMenu() } }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = updaterController
-        statusItem.button?.image = binderClipStatusIcon()
-        statusItem.button?.imagePosition = .imageOnly
-        transport.onClipboard = { [weak self] text in self?.clipboard.applyRemote(text) }
-        transport.onImage = { [weak self] image in self?.clipboard.applyRemote(image) }
+        updateStatusIcon()
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        transport.onClipboard = { [weak self] text in
+            self?.clipboard.applyRemote(text)
+            self?.notifyIncoming(title: "BinderClip", body: "Received text")
+        }
+        transport.onImage = { [weak self] image in
+            self?.clipboard.applyRemote(image)
+            self?.notifyIncoming(title: "BinderClip", body: "Received image (\(image.mimeType))")
+        }
         transport.onPeersChanged = { [weak self] peers in self?.peers = peers }
         transport.onLog = { [weak self] message in self?.status = message }
         transport.onTransferStatus = { [weak self] message in self?.status = message }
@@ -38,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         clipboard.onLocalText = { [weak transport] text in transport?.sendClipboard(text) }
         clipboard.onLocalImage = { [weak transport] image in transport?.sendImage(image) }
-        transport.start(); clipboard.start(); peers = transport.peersSnapshot(); renderMenu()
+        transport.start(); clipboard.start(); peers = transport.peersSnapshot(); renderMenu(); updateStatusIcon()
     }
 
     func applicationWillTerminate(_ notification: Notification) { clipboard.stop(); transport.stop() }
@@ -47,10 +54,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         renderMenu()
     }
 
+    private func notifyIncoming(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func updateStatusIcon() {
+        statusItem.button?.image = binderClipStatusIcon()
+        statusItem.button?.imagePosition = .imageOnly
+        let hasConnectedPeers = peers.contains(where: \.connected)
+        if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
+            statusItem.button?.toolTip = "BinderClip: \(status)"
+        } else {
+            statusItem.button?.toolTip = hasConnectedPeers ? "BinderClip: Connected" : "BinderClip: \(status)"
+        }
+    }
+
     private func renderMenu() {
         let menu = NSMenu()
         menu.delegate = self
         renderPendingPermissions(into: menu)
+        if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
+            let progressItem = NSMenuItem(title: "⚡ \(status)", action: nil, keyEquivalent: "")
+            progressItem.isEnabled = false
+            menu.addItem(progressItem)
+            menu.addItem(.separator())
+        }
         if #available(macOS 14.0, *) {
             menu.addItem(.sectionHeader(title: "This Chain"))
         } else {
@@ -71,8 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         menu.addItem(.separator())
         let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n"); pair.target = self; menu.addItem(pair)
-        let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: ""); send.target = self; send.isEnabled = !peers.filter(\.connected).isEmpty; menu.addItem(send)
-        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: ""); logs.target = self; menu.addItem(logs)
+        if let preview = clipboard.currentPreviewDescription() {
+            let previewItem = NSMenuItem(title: "Ready to Send: \(preview)", action: nil, keyEquivalent: "")
+            previewItem.isEnabled = false
+            menu.addItem(previewItem)
+        }
+        let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s"); send.target = self; send.isEnabled = !peers.filter(\.connected).isEmpty; menu.addItem(send)
+        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l"); logs.target = self; menu.addItem(logs)
         let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""); updates.target = self; menu.addItem(updates)
         menu.addItem(.separator()); menu.addItem(NSMenuItem(title: "Quit BinderClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu

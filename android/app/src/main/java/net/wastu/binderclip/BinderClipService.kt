@@ -51,6 +51,7 @@ class BinderClipService : Service() {
         const val ACTION_REMOVE_MEMBER = "net.wastu.binderclip.REMOVE_MEMBER"
         const val ACTION_SEND_SHARED = "net.wastu.binderclip.SEND_SHARED"
         const val ACTION_REQUEST_INVITE = "net.wastu.binderclip.REQUEST_INVITE"
+        const val ACTION_SEARCH_RECONNECT = "net.wastu.binderclip.SEARCH_RECONNECT"
         const val EXTRA_MEMBER_ID = "member_id"
         const val EXTRA_URI = "uri"
         private const val CHANNEL = "binderclip_sync"
@@ -116,17 +117,35 @@ class BinderClipService : Service() {
                 runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
             } }
             ACTION_SEND_CURRENT -> executor.execute { sendCurrentClipboard(userInitiated = true) }
+            ACTION_SEARCH_RECONNECT -> executor.execute { client.reconnect() }
             ACTION_SEND_SHARED -> executor.execute {
                 when (val shared = SharedPayloadCache.value.also { SharedPayloadCache.value = null }) {
                     is SharedPayload.Image -> sendSharedImage(shared.value)
-                    is SharedPayload.Text -> client.sendText(shared.value)
-                    null -> reportFailure("Nothing received from the share sheet")
+                    is SharedPayload.Text -> {
+                        applyText(shared.value)
+                        if (!client.isConnected()) client.reconnect()
+                        if (!client.isConnected()) reportFailure("Text copied, but no device is connected")
+                        else {
+                            lastSentText = shared.value
+                            lastSendAt = System.currentTimeMillis()
+                            client.sendText(shared.value)
+                        }
+                    }
+                    null -> reportFailure("Nothing to share")
                 }
             }
             ACTION_REQUEST_INVITE -> executor.execute { client.requestInvite() }
             ACTION_COPY_PENDING -> {
-                store.pendingText?.let { applyText(it); store.pendingText = null }
-                pendingImage?.let { applyImage(it); pendingImage = null }
+                store.pendingText?.let { text ->
+                    applyText(text)
+                    store.pendingText = null
+                    toast("Copied text")
+                }
+                pendingImage?.let { image ->
+                    applyImage(image)
+                    pendingImage = null
+                    toast("Copied image")
+                }
                 publishState()
             }
             ACTION_UI_VISIBLE -> uiVisible = intent?.getBooleanExtra("visible", false) ?: false
@@ -181,7 +200,8 @@ class BinderClipService : Service() {
 
     private fun startRootPolling() {
         if (rootPoll != null) return
-        rootFingerprint = null
+        // Seed rootFingerprint with current clipboard to prevent echoing stale clipboard at start
+        rootFingerprint = runCatching { RootClipboardBridge.read(this, clipboard)?.fingerprint }.getOrNull()
         rootPoll = reconnectExecutor.scheduleWithFixedDelay({
             if (!automaticClipboardEnabled) return@scheduleWithFixedDelay
             if (!client.isConnected()) return@scheduleWithFixedDelay
@@ -251,13 +271,19 @@ class BinderClipService : Service() {
     }
     private fun applyText(text: String) {
         suppressClipboard = text
+        rootFingerprint = "text:$text"
+        lastSentText = text
+        lastSendAt = System.currentTimeMillis()
         clipboard.setPrimaryClip(ClipData.newPlainText("BinderClip", text))
-        android.os.Handler(mainLooper).postDelayed({ if (suppressClipboard == text) suppressClipboard = null }, 1_000)
+        android.os.Handler(mainLooper).postDelayed({ if (suppressClipboard == text) suppressClipboard = null }, 1_500)
     }
     private fun applyImage(image: ImagePayload) {
         suppressImageHash = image.sha256
+        rootFingerprint = "image:${image.sha256}"
+        lastSentImageHash = image.sha256
+        lastSendAt = System.currentTimeMillis()
         ImageClipboard.write(this, clipboard, image)
-        android.os.Handler(mainLooper).postDelayed({ if (suppressImageHash == image.sha256) suppressImageHash = null }, 1_000)
+        android.os.Handler(mainLooper).postDelayed({ if (suppressImageHash == image.sha256) suppressImageHash = null }, 1_500)
     }
     private fun updateStatus(message: String) {
         Log.i("BinderClip", message)
@@ -314,7 +340,14 @@ class BinderClipService : Service() {
     }
     private fun notification(status: String): android.app.Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val builder = NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_binder_clip).setContentTitle("BinderClip").setContentText(status).setContentIntent(open).setOngoing(true)
+        val builder = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.drawable.ic_binder_clip)
+            .setContentTitle("BinderClip")
+            .setContentText(status)
+            .setContentIntent(open)
+            .setOngoing(true)
+        val send = PendingIntent.getService(this, 2, Intent(this, BinderClipService::class.java).setAction(ACTION_SEND_CURRENT), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        builder.addAction(0, "Send clipboard", send)
         if (store.pendingText != null || pendingImage != null) {
             val copy = PendingIntent.getService(this, 1, Intent(this, BinderClipService::class.java).setAction(ACTION_COPY_PENDING), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             builder.addAction(0, if (pendingImage != null) "Copy image" else "Copy text", copy)

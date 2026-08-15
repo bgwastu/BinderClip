@@ -38,13 +38,21 @@ object RootClipboardBridge {
     }.getOrDefault(false)
 
     fun enableBackgroundAccess(context: Context): Boolean {
-        if (hasBackgroundAccess(context)) return true
-        runRootCommand("pm grant ${shellQuote(context.packageName)} $BACKGROUND_CLIPBOARD_PERMISSION")
+        if (hasBackgroundAccess(context)) {
+            val pkg = shellQuote(context.packageName)
+            runRootCommand("cmd appops set $pkg READ_CLIPBOARD allow")
+            return true
+        }
+        val pkg = shellQuote(context.packageName)
+        runRootCommand("pm grant $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
+        runRootCommand("cmd appops set $pkg READ_CLIPBOARD allow")
         return hasBackgroundAccess(context)
     }
 
     fun revokeBackgroundAccess(context: Context) {
-        runRootCommand("pm revoke ${shellQuote(context.packageName)} $BACKGROUND_CLIPBOARD_PERMISSION")
+        val pkg = shellQuote(context.packageName)
+        runRootCommand("pm revoke $pkg $BACKGROUND_CLIPBOARD_PERMISSION")
+        runRootCommand("cmd appops set $pkg READ_CLIPBOARD default")
     }
 
     fun hasBackgroundAccess(context: Context): Boolean =
@@ -52,23 +60,31 @@ object RootClipboardBridge {
 
     fun read(context: Context, clipboard: ClipboardManager): Clip? = runCatching {
         val clip = clipboard.primaryClip ?: return null
+        val item = clip.takeIf { it.itemCount > 0 }?.getItemAt(0) ?: return null
         val imageMime = clip.description?.filterMimeTypes("image/*")
             ?.firstOrNull { it in ImagePayload.ALLOWED_MIME_TYPES }
-        if (imageMime != null) {
-            val uri = clip.getItemAt(0).uri
-            val fingerprint = "unreadable-image:${uri ?: clip.description}"
-            if (fingerprint == ignoredUnreadableImage) return Clip.UnreadableImage(fingerprint)
-            ImageClipboard.read(context, clipboard)?.let {
+        if (imageMime != null || item.uri != null) {
+            val scheme = item.uri?.scheme?.lowercase()
+            if (scheme == "content" || scheme == "file" || imageMime != null) {
+                val fingerprint = "unreadable-image:${item.uri ?: clip.description}"
+                if (fingerprint == ignoredUnreadableImage) return Clip.UnreadableImage(fingerprint)
+                ImageClipboard.read(context, clipboard)?.let {
+                    ignoredUnreadableImage = null
+                    return Clip.Image(it)
+                }
+                if (scheme == "file") {
+                    ignoredUnreadableImage = fingerprint
+                    return Clip.UnreadableImage(fingerprint)
+                }
+            } else if (scheme == "http" || scheme == "https") {
                 ignoredUnreadableImage = null
-                return Clip.Image(it)
+                return Clip.Text(item.uri.toString())
             }
-            ignoredUnreadableImage = fingerprint
-            return Clip.UnreadableImage(fingerprint)
         }
         ignoredUnreadableImage = null
-        // Do not coerce a URI into its title: that is how a copied file became
-        // a fake filename clipboard entry in earlier builds.
-        clip.getItemAt(0).text?.toString()?.takeIf { it.isNotBlank() }?.let(Clip::Text)
+        val text = item.text?.toString()?.takeIf { it.isNotBlank() }
+            ?: runCatching { item.coerceToText(context)?.toString() }.getOrNull()?.takeIf { it.isNotBlank() }
+        text?.let(Clip::Text)
     }.getOrNull()
 
     private fun runRootCommand(command: String): Boolean = runCatching {

@@ -62,6 +62,17 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
         <service
+            android:name=".SendClipboardTileService"
+            android:icon="@drawable/ic_binder_clip"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
             android:name=".ClipboardAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"

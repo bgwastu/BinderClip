@@ -60,7 +60,11 @@ object ImageClipboard {
         val file = File(directory, "${image.sha256}.$extension")
         file.writeBytes(image.data)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.images", file)
-        clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "BinderClip image", uri))
+        val description = android.content.ClipDescription(
+            "BinderClip image",
+            arrayOf(image.mimeType, "image/*", android.content.ClipDescription.MIMETYPE_TEXT_URILIST)
+        )
+        clipboard.setPrimaryClip(ClipData(description, ClipData.Item(uri)))
     }
 
     fun clearStale(context: Context) {

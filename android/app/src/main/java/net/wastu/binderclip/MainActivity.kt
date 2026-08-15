@@ -41,6 +41,9 @@ import androidx.compose.material.icons.outlined.LaptopMac
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -121,6 +124,7 @@ class MainActivity : AppCompatActivity() {
                     onRequestInvite = { startService(BinderClipService.ACTION_REQUEST_INVITE) },
                     onSend = { startService(BinderClipService.ACTION_SEND_CURRENT) },
                     onCopy = { startService(BinderClipService.ACTION_COPY_PENDING) },
+                    onReconnect = { startService(BinderClipService.ACTION_SEARCH_RECONNECT) },
                     onToggleRoot = { enabled -> startService(BinderClipService.ACTION_TOGGLE_ROOT_AUTOMATION, enabled = enabled) },
                     onDisableAccessibility = { startService(BinderClipService.ACTION_DISABLE_ACCESSIBILITY) },
                     onRemove = { id -> startService(BinderClipService.ACTION_REMOVE_MEMBER, memberId = id) },
@@ -163,7 +167,7 @@ class MainActivity : AppCompatActivity() {
     state: AppState, cameraGranted: Boolean, notificationsGranted: Boolean, batteryOptimizationIgnored: Boolean, autoStartHelpNeeded: Boolean, permissionRevision: Int,
     onScan: () -> Unit, onRequestCamera: () -> Unit, onRequestNotifications: () -> Unit, onOpenAccessibility: () -> Unit,
     onRequestBatteryOptimization: () -> Unit, onOpenAppDetails: () -> Unit,
-    onRequestInvite: () -> Unit, onSend: () -> Unit, onCopy: () -> Unit, onToggleRoot: (Boolean) -> Unit,
+    onRequestInvite: () -> Unit, onSend: () -> Unit, onCopy: () -> Unit, onReconnect: () -> Unit, onToggleRoot: (Boolean) -> Unit,
     onDisableAccessibility: () -> Unit, onRemove: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -213,7 +217,9 @@ class MainActivity : AppCompatActivity() {
             contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            item { ChainHeader(state.status) }
+            item {
+                ChainHeader(status = state.status, onReconnect = onReconnect)
+            }
             if (devices.isEmpty()) item { EmptyChain() }
             else items(devices.size, key = { devices[it].deviceId }) { index ->
                 val device = devices[index]
@@ -249,12 +255,22 @@ class MainActivity : AppCompatActivity() {
                     summary = if (state.automaticClipboardEnabled) "Root syncs text and images in the background." else "Use approved root access for text and images.",
                     checked = state.automaticClipboardEnabled,
                     onChanged = onToggleRoot,
-                ) else PreferenceToggle(
-                    title = "Automatic Sync Clipboard",
-                    summary = if (state.accessibilityEnabled) "Accessibility syncs copied text in the background." else "Enable Accessibility to sync copied text.",
-                    checked = state.accessibilityEnabled,
-                    onChanged = { enabled -> if (enabled) onOpenAccessibility() else onDisableAccessibility() },
-                )
+                ) else {
+                    Column {
+                        PreferenceToggle(
+                            title = "Automatic Sync Clipboard",
+                            summary = if (state.accessibilityEnabled) "Accessibility syncs copied text in the background." else "Enable Accessibility to sync copied text.",
+                            checked = state.accessibilityEnabled,
+                            onChanged = { enabled -> if (enabled) onOpenAccessibility() else onDisableAccessibility() },
+                        )
+                        Text(
+                            "Tip: You can also use the BinderClip Quick Settings Tile or notification action to send clipboard instantly without root.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -275,23 +291,87 @@ class MainActivity : AppCompatActivity() {
     }
     pairingUrl?.let { url -> PairingCodeDialog(url) { AppRuntime.pairingUrl.value = null } }
     if (showLogs) {
+        var logQuery by remember { mutableStateOf("") }
+        var selectedFilter by remember { mutableStateOf<DiagnosticLevel?>(null) }
+        val filteredEvents = remember(diagnosticEvents, logQuery, selectedFilter) {
+            diagnosticEvents.filter { event ->
+                (selectedFilter == null || event.level == selectedFilter) &&
+                (logQuery.isBlank() || event.message.contains(logQuery, ignoreCase = true))
+            }
+        }
         AlertDialog(
             onDismissRequest = { showLogs = false },
-            title = { Text("Logs") },
+            title = { Text("Logs (${filteredEvents.size})") },
             text = {
-                if (diagnosticEvents.isEmpty()) Text("No events yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(diagnosticEvents.size, key = { diagnosticEvents[it].timestamp }) { index ->
-                        val event = diagnosticEvents[diagnosticEvents.lastIndex - index]
-                        Text(
-                            "${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(event.timestamp))} · ${event.message}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = when (event.level) {
-                                DiagnosticLevel.Error -> MaterialTheme.colorScheme.error
-                                DiagnosticLevel.Warning -> MaterialTheme.colorScheme.onSurfaceVariant
-                                DiagnosticLevel.Info -> MaterialTheme.colorScheme.onSurface
-                            },
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = logQuery,
+                        onValueChange = { logQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Search logs…", style = MaterialTheme.typography.bodyMedium) },
+                        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = "Search") },
+                        trailingIcon = {
+                            if (logQuery.isNotEmpty()) {
+                                IconButton(onClick = { logQuery = "" }) {
+                                    Icon(Icons.Outlined.Close, contentDescription = "Clear")
+                                }
+                            }
+                        },
+                        singleLine = true,
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        androidx.compose.material3.FilterChip(
+                            selected = selectedFilter == null,
+                            onClick = { selectedFilter = null },
+                            label = { Text("All") }
                         )
+                        androidx.compose.material3.FilterChip(
+                            selected = selectedFilter == DiagnosticLevel.Info,
+                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Info) null else DiagnosticLevel.Info },
+                            label = { Text("Info") }
+                        )
+                        androidx.compose.material3.FilterChip(
+                            selected = selectedFilter == DiagnosticLevel.Warning,
+                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Warning) null else DiagnosticLevel.Warning },
+                            label = { Text("Warning") }
+                        )
+                        androidx.compose.material3.FilterChip(
+                            selected = selectedFilter == DiagnosticLevel.Error,
+                            onClick = { selectedFilter = if (selectedFilter == DiagnosticLevel.Error) null else DiagnosticLevel.Error },
+                            label = { Text("Error") }
+                        )
+                    }
+                    if (filteredEvents.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(140.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                if (logQuery.isBlank()) "No events yet." else "No matching events.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(filteredEvents.size, key = { filteredEvents[it].timestamp }) { index ->
+                                val event = filteredEvents[filteredEvents.lastIndex - index]
+                                Text(
+                                    "${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(event.timestamp))} · ${event.message}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = when (event.level) {
+                                        DiagnosticLevel.Error -> MaterialTheme.colorScheme.error
+                                        DiagnosticLevel.Warning -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        DiagnosticLevel.Info -> MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
             },
@@ -310,9 +390,21 @@ private data class PermissionNeed(val title: String, val summary: String, val ic
     trailingContent = { TextButton(onClick = need.onClick) { Text(need.actionLabel) } },
 )
 @Composable private fun EmptyChain() = ListItem(headlineContent = { Text("No devices yet") }, supportingContent = { Text("Scan a code to join.") })
-@Composable private fun ChainHeader(status: String) = Box(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)) {
+@Composable private fun ChainHeader(status: String, onReconnect: () -> Unit) = Row(
+    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.SpaceBetween
+) {
     Text("This chain", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-    Text(status, modifier = Modifier.align(Alignment.CenterEnd), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (status.startsWith("Waiting") || status.startsWith("Searching") || status.startsWith("Connection")) {
+            Spacer(Modifier.width(4.dp))
+            IconButton(onClick = onReconnect, modifier = Modifier.size(24.dp)) {
+                Icon(Icons.Outlined.Refresh, contentDescription = "Reconnect", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
 }
 @Composable private fun SectionTitle(text: String, topPadding: androidx.compose.ui.unit.Dp = 14.dp) = Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = topPadding, bottom = 2.dp))
 @Composable private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, onClick: () -> Unit) {

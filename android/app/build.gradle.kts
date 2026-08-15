@@ -50,8 +50,8 @@ android {
         minSdk = 31
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = (System.getenv("VERSION_CODE") ?: "9").toInt()
-        versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
+        versionCode = (System.getenv("VERSION_CODE") ?: "10").toInt()
+        versionName = System.getenv("VERSION_NAME") ?: "1.0.4"
 
         val gitHash = providers.exec {
             commandLine("git", "rev-parse", "--short", "HEAD")

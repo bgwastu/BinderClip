@@ -74,7 +74,12 @@ class DirectClient(
     }
 
     private fun pair(host: String, port: Int, id: String, inviteKey: ByteArray) {
-        val newSocket = Socket().apply { connect(InetSocketAddress(host, port), 10_000); soTimeout = 15_000 }
+        val newSocket = Socket().apply {
+            tcpNoDelay = true
+            keepAlive = true
+            connect(InetSocketAddress(host, port), 10_000)
+            soTimeout = 15_000
+        }
         val input = DataInputStream(newSocket.getInputStream()); val newOutput = DataOutputStream(newSocket.getOutputStream())
         val clientNonce = DeviceStore.nonce()
         DirectProtocol.write(newOutput, JSONObject().put("type", "invite").put("id", id).put("nonce", clientNonce).put("proof", DirectProtocol.hmac(inviteKey, "client|$id|$clientNonce")))
@@ -97,16 +102,48 @@ class DirectClient(
     }
 
     fun reconnect() {
-        val peer = store.peer ?: store.members.firstOrNull { it.platform == "macOS" } ?: return; val key = store.groupKey ?: return
-        close(); onStatus("Connecting to ${peer.name}…")
-        runCatching {
-            val newSocket = Socket().apply { connect(InetSocketAddress(peer.host, peer.port), 10_000); soTimeout = 0 }
-            attach(newSocket, DataInputStream(newSocket.getInputStream()), DataOutputStream(newSocket.getOutputStream()), key)
-            sendHello(); onStatus("Connected")
-        }.onFailure { error ->
-            Log.w("BinderClip", "Reconnect to ${peer.host}:${peer.port} failed", error)
-            DiagnosticLog.warning("Reconnect failed: ${error.message ?: "route unavailable"}")
-            onStatus("Waiting for ${peer.name}")
+        val primaryPeer = store.peer ?: store.members.firstOrNull { it.platform == "macOS" } ?: return
+        val key = store.groupKey ?: return
+        close(); onStatus("Connecting to ${primaryPeer.name}…")
+
+        // Build unique candidate targets from peer and stored members
+        val candidateHosts = buildList {
+            add(primaryPeer.host)
+            store.members.filter { it.platform == "macOS" }.forEach { add(it.host) }
+        }.distinct().filter { it.isNotBlank() }
+
+        var connectedSocket: Socket? = null
+        var activeHost: String? = null
+        var lastError: Exception? = null
+
+        for (host in candidateHosts) {
+            try {
+                val sock = Socket().apply {
+                    tcpNoDelay = true
+                    keepAlive = true
+                    connect(InetSocketAddress(host, primaryPeer.port), 5_000)
+                    soTimeout = 0
+                }
+                connectedSocket = sock
+                activeHost = host
+                break
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+
+        val sock = connectedSocket
+        if (sock != null && activeHost != null) {
+            if (activeHost != primaryPeer.host) {
+                store.peer = primaryPeer.copy(host = activeHost)
+            }
+            attach(sock, DataInputStream(sock.getInputStream()), DataOutputStream(sock.getOutputStream()), key)
+            sendHello()
+            onStatus("Connected")
+        } else {
+            Log.w("BinderClip", "Reconnect failed across ${candidateHosts.size} routes", lastError)
+            DiagnosticLog.warning("Reconnect failed: ${lastError?.message ?: "route unavailable"}")
+            onStatus("Waiting for ${primaryPeer.name}")
             onDisconnected()
         }
     }

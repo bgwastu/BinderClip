@@ -48,8 +48,14 @@ fun BinderClipTheme(content: @Composable () -> Unit) {
     val view = LocalView.current
     if (!view.isInEditMode) SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
-        window.statusBarColor = colors.background.toArgb()
-        window.navigationBarColor = colors.background.toArgb()
+        // Edge-to-edge is enforced on API 35+ and these calls are deprecated
+        // there (and no-ops). Only apply legacy bar colors below that.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = colors.background.toArgb()
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = colors.background.toArgb()
+        }
         WindowCompat.getInsetsController(window, view).apply {
             isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark

@@ -416,20 +416,7 @@ class BinderClipService : Service() {
             override fun onDiscoveryStarted(regType: String) {}
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (service.serviceType.contains("binderclip", ignoreCase = true)) {
-                    runCatching {
-                        nsdManager.resolveService(service, object : NsdManager.ResolveListener {
-                            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
-                            override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                                val host = serviceInfo.host?.hostAddress ?: return
-                                val port = serviceInfo.port
-                                val currentPeer = store.peer ?: return
-                                if (host.isNotBlank() && (currentPeer.host != host || !client.isConnected())) {
-                                    store.peer = currentPeer.copy(host = host, port = port)
-                                    resetReconnectBackoffAndTrigger("nsd_resolved")
-                                }
-                            }
-                        })
-                    }
+                    resolveNsdService(service)
                 }
             }
 
@@ -441,6 +428,42 @@ class BinderClipService : Service() {
         nsdDiscoveryListener = listener
         runCatching {
             nsdManager.discoverServices("_binderclip._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
+        }
+    }
+
+    /** Resolve an mDNS service. Prefers the modern ServiceInfoCallback API
+     *  (API 34+) and falls back to the legacy ResolveListener below it. */
+    private fun resolveNsdService(service: NsdServiceInfo) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching {
+                val callback = object : NsdManager.ServiceInfoCallback {
+                    override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {}
+                    override fun onServiceInfoCallbackUnregistered() {}
+                    override fun onServiceLost() {}
+                    override fun onServiceUpdated(updated: NsdServiceInfo) {
+                        onNsdResolved(updated)
+                    }
+                }
+                nsdManager.registerServiceInfoCallback(service, executor, callback)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            runCatching {
+                nsdManager.resolveService(service, object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+                    override fun onServiceResolved(serviceInfo: NsdServiceInfo) { onNsdResolved(serviceInfo) }
+                })
+            }
+        }
+    }
+
+    private fun onNsdResolved(serviceInfo: NsdServiceInfo) {
+        val host = serviceInfo.hostAddresses.firstOrNull()?.hostAddress ?: return
+        val port = serviceInfo.port
+        val currentPeer = store.peer ?: return
+        if (host.isNotBlank() && (currentPeer.host != host || !client.isConnected())) {
+            store.peer = currentPeer.copy(host = host, port = port)
+            resetReconnectBackoffAndTrigger("nsd_resolved")
         }
     }
 

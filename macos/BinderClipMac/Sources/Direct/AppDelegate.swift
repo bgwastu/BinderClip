@@ -59,7 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         transport.onLocalNetworkPermissionRequired = { [weak self] required in
             DispatchQueue.main.async { self?.localNetworkPermissionRequired = required }
         }
-        clipboard.onLocalText = { [weak transport] text in transport?.sendClipboard(text) }
+        clipboard.onLocalText = { [weak transport] text in
+            // URLs are sent to be OPENED on the target device, mirroring the
+            // manual "Send Clipboard to …" behavior.
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                transport?.sendOpenURL(url)
+            } else {
+                transport?.sendClipboard(text)
+            }
+        }
         clipboard.onLocalImage = { [weak transport] image in transport?.sendImage(image) }
         transport.start(); clipboard.start(); peers = transport.peersSnapshot(); renderMenu(); updateStatusIcon()
         #if DEBUG

@@ -45,26 +45,25 @@ android {
     namespace = "net.wastu.binderclip"
     compileSdk = 36
 
-    val gitTagVersion = providers.exec {
-        commandLine("git", "describe", "--tags", "--abbrev=0")
-    }.standardOutput.asText.map { it.trim().removePrefix("v") }.orElse("1.0.0")
+    fun gitProvider(vararg args: String, fallback: String): String = runCatching {
+        providers.exec {
+            commandLine("git", *args)
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim().takeIf { it.isNotEmpty() } ?: fallback
+    }.getOrDefault(fallback)
 
-    val gitCommitCount = providers.exec {
-        commandLine("git", "rev-list", "--count", "HEAD")
-    }.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }.orElse(1)
-
-    val gitHash = providers.exec {
-        commandLine("git", "rev-parse", "--short", "HEAD")
-    }.standardOutput.asText.map { it.trim() }.orElse("unknown")
+    val gitTagVersion = gitProvider("describe", "--tags", "--abbrev=0", fallback = "1.0.0").removePrefix("v")
+    val gitCommitCount = gitProvider("rev-list", "--count", "HEAD", fallback = "1").toIntOrNull() ?: 1
+    val gitHash = gitProvider("rev-parse", "--short", "HEAD", fallback = "unknown")
 
     defaultConfig {
         applicationId = "net.wastu.binderclip"
         minSdk = 31
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = (System.getenv("VERSION_CODE")?.toIntOrNull()) ?: gitCommitCount.get()
-        versionName = System.getenv("VERSION_NAME") ?: gitTagVersion.get()
-        buildConfigField("String", "GIT_HASH", "\"${gitHash.get()}\"")
+        versionCode = (System.getenv("VERSION_CODE")?.toIntOrNull()) ?: gitCommitCount
+        versionName = System.getenv("VERSION_NAME") ?: gitTagVersion
+        buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
     }
 
     signingConfigs {

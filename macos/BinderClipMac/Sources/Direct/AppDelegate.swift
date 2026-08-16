@@ -22,13 +22,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         userDriverDelegate: nil
     )
     private var peerCountBeforePairing: Int?
-    private var peers: [Peer] = [] { didSet { renderMenu(); updateStatusIcon(); checkPairingCompletion() } }
-    private var status = "Listening" { didSet { renderMenu(); updateStatusIcon() } }
-    private var localNetworkPermissionRequired = false { didSet { renderMenu() } }
-    private var automationPermissionRequired = false { didSet { renderMenu() } }
+    private var peers: [Peer] = [] { didSet { scheduleStateRefresh() } }
+    private var status = "Listening" { didSet { scheduleStateRefresh() } }
+    private var localNetworkPermissionRequired = false { didSet { scheduleStateRefresh() } }
+    private var automationPermissionRequired = false { didSet { scheduleStateRefresh() } }
     private var cachedActiveTab: (browser: String, url: URL)?
     private var tabPollTimer: Timer?
     private let statusMenu = NSMenu()
+
+    /// NSMenu/NSStatusItem/PairingWindow must only be touched on the main
+    /// thread. These state properties are set from background queues (transport
+    /// callbacks, browser-tab polling), so route the UI refresh through main.
+    private func scheduleStateRefresh() {
+        if Thread.isMainThread {
+            renderMenu(); updateStatusIcon(); checkPairingCompletion()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.renderMenu(); self.updateStatusIcon(); self.checkPairingCompletion()
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = updaterController
@@ -54,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             ToastHUD.shared.show(message: "Received image (\(image.mimeType))", icon: "photo.fill")
         }
         transport.onPeersChanged = { [weak self] peers in self?.peers = peers }
-        transport.onLog = { [weak self] message in self?.status = message; self?.checkPairingCompletion() }
+        transport.onLog = { [weak self] message in self?.status = message }
         transport.onTransferStatus = { [weak self] message in self?.status = message }
         transport.onLocalNetworkPermissionRequired = { [weak self] required in
             DispatchQueue.main.async { self?.localNetworkPermissionRequired = required }

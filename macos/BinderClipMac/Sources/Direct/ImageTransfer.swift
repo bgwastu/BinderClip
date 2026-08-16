@@ -52,7 +52,12 @@ enum ImageClipboard {
         case "image/heic": NSPasteboard.PasteboardType("public.heic")
         default: .png
         }
-        pasteboard.clearContents(); pasteboard.setData(payload.data, forType: type)
+        pasteboard.clearContents()
+        pasteboard.setData(payload.data, forType: type)
+        // Also provide TIFF representation if convertible so all macOS apps can paste seamlessly
+        if let image = NSImage(data: payload.data), let tiff = image.tiffRepresentation {
+            pasteboard.setData(tiff, forType: .tiff)
+        }
     }
 }
 

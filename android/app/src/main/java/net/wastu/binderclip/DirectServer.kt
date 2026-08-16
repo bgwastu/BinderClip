@@ -183,6 +183,8 @@ class DirectServer(
         invites[id] = key to (System.currentTimeMillis() + INVITE_TTL_MS)
         val hostQuery = hosts.take(4).joinToString("&") { "host=${android.net.Uri.encode(it)}" }
         val url = "binderclip://invite?$hostQuery&port=${portForSpace()}&id=$id&key=${Base64.getUrlEncoder().encodeToString(key)}"
+        Log.i("BinderClip", "Pairing URL generated: $url")
+        DiagnosticLog.info("Pairing URL generated: $url")
         onInvite(url)
         return url
     }
@@ -392,13 +394,18 @@ class DirectServer(
                 // connection dropped after a network/VPN change). It proves
                 // membership by encrypting its hello with the group key.
                 key != null && first.optString("type") == "encrypted" -> {
-                    val hello = runCatching { DirectProtocol.open(first, key) }.getOrNull() ?: return
+                    val hello = runCatching { DirectProtocol.open(first, key) }
+                        .onFailure { Log.w("BinderClip", "Host failed to decrypt returning member hello", it) }
+                        .getOrNull() ?: return
                     if (hello.optString("type") != "hello") return
                     acceptReturningMember(socket, output, key, hello, pairKey = null)
                     readLoop(socket, input, output, key)
                 }
 
-                else -> return
+                else -> {
+                    Log.w("BinderClip", "Host unhandled first frame type: ${first.optString("type")}, keyIsNull: ${key == null}")
+                    return
+                }
             }
         } catch (error: Exception) {
             Log.w("BinderClip", "Host handshake failed", error)

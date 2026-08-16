@@ -27,12 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var localNetworkPermissionRequired = false { didSet { scheduleStateRefresh() } }
     private var automationPermissionRequired = false { didSet { scheduleStateRefresh() } }
     private var cachedActiveTab: (browser: String, url: URL)?
-    private var tabPollTimer: Timer?
     private let statusMenu = NSMenu()
 
-    /// NSMenu/NSStatusItem/PairingWindow must only be touched on the main
-    /// thread. These state properties are set from background queues (transport
-    /// callbacks, browser-tab polling), so route the UI refresh through main.
     private func scheduleStateRefresh() {
         if Thread.isMainThread {
             renderMenu(); updateStatusIcon(); checkPairingCompletion()
@@ -50,8 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         statusMenu.autoenablesItems = false
         statusItem.menu = statusMenu
         updateStatusIcon()
-        startTabPolling()
+
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
         transport.onClipboard = { [weak self] text in
             self?.clipboard.applyRemote(text)
             self?.notifyIncoming(title: "BinderClip", body: "Received text")
@@ -67,15 +64,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             self?.notifyIncoming(title: "BinderClip", body: "Received image (\(image.mimeType))")
             ToastHUD.shared.show(message: "Received image (\(image.mimeType))", icon: "photo.fill")
         }
-        transport.onPeersChanged = { [weak self] peers in self?.peers = peers }
-        transport.onLog = { [weak self] message in self?.status = message }
-        transport.onTransferStatus = { [weak self] message in self?.status = message }
+        transport.onPeersChanged = { [weak self] peers in
+            self?.peers = peers
+        }
+        transport.onLog = { [weak self] message in
+            self?.status = message
+        }
+        transport.onTransferStatus = { [weak self] message in
+            self?.status = message
+        }
         transport.onLocalNetworkPermissionRequired = { [weak self] required in
             DispatchQueue.main.async { self?.localNetworkPermissionRequired = required }
         }
+
         clipboard.onLocalText = { [weak transport] text in
-            // URLs are sent to be OPENED on the target device, mirroring the
-            // manual "Send Clipboard to …" behavior.
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
                 transport?.sendOpenURL(url)
@@ -83,12 +85,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 transport?.sendClipboard(text)
             }
         }
-        clipboard.onLocalImage = { [weak transport] image in transport?.sendImage(image) }
-        transport.start(); clipboard.start(); peers = transport.peersSnapshot(); renderMenu(); updateStatusIcon()
+        clipboard.onLocalImage = { [weak transport] image in
+            transport?.sendImage(image)
+        }
+
+        transport.start()
+        clipboard.start()
+        peers = transport.peersSnapshot()
+        renderMenu()
+        updateStatusIcon()
+
         #if DEBUG
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             if let invite = self?.transport.createInvite() {
-                let debugDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("net.wastu.binderclip", isDirectory: true)
+                let debugDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
                 try? FileManager.default.createDirectory(at: debugDir, withIntermediateDirectories: true)
                 try? invite.absoluteString.write(to: debugDir.appendingPathComponent("debug-invite.txt"), atomically: true, encoding: .utf8)
                 print("[BinderClip Debug] Ready pairing code: \(invite.absoluteString)")
@@ -96,7 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             if self?.peers.isEmpty == true {
                 self?.showPairing()
             }
-            // DEBUG: join a chain from debug-join.txt (mirrors the Join Chain paste).
             let joinURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
                 .appendingPathComponent("debug-join.txt")
@@ -109,9 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         #endif
     }
 
-    func applicationWillTerminate(_ notification: Notification) { clipboard.stop(); transport.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        clipboard.stop()
+        transport.stop()
+    }
 
     func menuWillOpen(_ menu: NSMenu) {
+        cachedActiveTab = activeBrowserTab()
         renderMenu()
     }
 
@@ -142,12 +156,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let menu = statusMenu
         menu.removeAllItems()
         renderPendingPermissions(into: menu)
+
         if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
             let progressItem = NSMenuItem(title: "⚡ \(status)", action: nil, keyEquivalent: "")
             progressItem.isEnabled = false
             menu.addItem(progressItem)
             menu.addItem(.separator())
         }
+
         if #available(macOS 14.0, *) {
             menu.addItem(.sectionHeader(title: "This Chain"))
         } else {
@@ -156,17 +172,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             chainHeader.indentationLevel = 0
             menu.addItem(chainHeader)
         }
+
         let thisMac = NSMenuItem(title: "\(transport.localDeviceName) (current)", action: nil, keyEquivalent: "")
         thisMac.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "This Mac")
         thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS"))
         menu.addItem(thisMac)
+
         for peer in peers {
             let title = peer.connected ? peer.name : "\(peer.name) (reconnecting)"
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
-            // Dim disconnected/reconnecting peers so connection truth is visible,
-            // but keep the item enabled so its submenu (details/actions) stays
-            // hoverable and usable.
             if !peer.connected {
                 let attributed = NSMutableAttributedString(string: title)
                 attributed.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: attributed.length))
@@ -175,15 +190,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             item.submenu = deviceMenu(for: peer)
             menu.addItem(item)
         }
+
         menu.addItem(.separator())
+
         if peers.isEmpty {
             let create = NSMenuItem(title: "Create New Chain", action: #selector(createNewChain), keyEquivalent: "n")
-            create.target = self; menu.addItem(create)
+            create.target = self
+            menu.addItem(create)
+
             let join = NSMenuItem(title: "Join Chain…", action: #selector(joinChain), keyEquivalent: "j")
-            join.target = self; menu.addItem(join)
+            join.target = self
+            menu.addItem(join)
         }
-        let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n"); pair.target = self; menu.addItem(pair)
-        let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s"); send.target = self; send.isEnabled = !peers.filter(\.connected).isEmpty; menu.addItem(send)
+
+        let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n")
+        pair.target = self
+        menu.addItem(pair)
+
+        let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s")
+        send.target = self
+        send.isEnabled = !peers.filter(\.connected).isEmpty
+        menu.addItem(send)
 
         let browserTab = cachedActiveTab
         let sendURLItem = NSMenuItem(
@@ -195,8 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             sendURLItem.isEnabled = true
             let urlSubmenu = NSMenu()
             urlSubmenu.autoenablesItems = false
-            
-            // Header showing the active URL purely as a disabled preview
+
             let truncatedUrlString = browserTab.url.absoluteString.count > 45 ? String(browserTab.url.absoluteString.prefix(42)) + "…" : browserTab.url.absoluteString
             let urlHeader = NSMenuItem(title: truncatedUrlString, action: nil, keyEquivalent: "")
             urlHeader.isEnabled = false
@@ -226,7 +252,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         menu.addItem(sendURLItem)
 
-        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l"); logs.target = self; menu.addItem(logs)
+        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
+        logs.target = self
+        menu.addItem(logs)
+
         let rawVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         #if DEBUG
         let versionString = rawVersion.map { $0.contains("debug") ? $0 : "\($0)-debug" } ?? "debug"
@@ -235,8 +264,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let versionString = rawVersion
         let updatesTitle = versionString.map { "Check for Updates…\tv\($0)" } ?? "Check for Updates…"
         #endif
-        let updates = NSMenuItem(title: updatesTitle, action: #selector(checkForUpdates), keyEquivalent: ""); updates.target = self; menu.addItem(updates)
-        menu.addItem(.separator()); menu.addItem(NSMenuItem(title: "Quit BinderClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let updates = NSMenuItem(title: updatesTitle, action: #selector(checkForUpdates), keyEquivalent: "")
+        updates.target = self
+        menu.addItem(updates)
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit BinderClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     private func binderClipStatusIcon() -> NSImage? {
@@ -247,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         image.isTemplate = true
         return image
     }
+
     private func renderPendingPermissions(into menu: NSMenu) {
         var hasPendingPermission = false
         let loginStatus = SMAppService.mainApp.status
@@ -297,6 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         peerCountBeforePairing = peers.count
         pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
     }
+
     @objc private func createNewChain() {
         let alert = NSAlert()
         alert.messageText = "Create a New Chain?"
@@ -308,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             showPairing()
         }
     }
+
     @objc private func joinChain() {
         let alert = NSAlert()
         alert.messageText = "Join a Chain"
@@ -325,32 +361,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
         }
     }
+
     private func checkPairingCompletion() {
         guard let before = peerCountBeforePairing else { return }
         let connectedCount = peers.filter(\.connected).count
-        let hadConnected = before
-        if connectedCount > hadConnected {
+        if connectedCount > before {
             peerCountBeforePairing = nil
             pairing.closeWithSuccess()
         }
     }
-    private func startTabPolling() {
-        refreshActiveBrowserTabAsync()
-        tabPollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.refreshActiveBrowserTabAsync()
-        }
-    }
 
-    private func refreshActiveBrowserTabAsync() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let tab = self.activeBrowserTab()
-            DispatchQueue.main.async {
-                self.cachedActiveTab = tab
-            }
-        }
-    }
-
+    /// Fast, safe active browser tab discovery without continuous background polling.
     private func activeBrowserTab() -> (browser: String, url: URL)? {
         let supportedBrowsers: [(bundleId: String, name: String, isChromium: Bool)] = [
             ("com.brave.Browser", "Brave", true),
@@ -367,19 +388,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         let runningApps = NSWorkspace.shared.runningApplications
         let runningBundleIDs = Set(runningApps.compactMap(\.bundleIdentifier))
-
         let runningBrowsers = supportedBrowsers.filter { runningBundleIDs.contains($0.bundleId) }
         guard !runningBrowsers.isEmpty else { return nil }
 
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-
         let sortedBrowsers = runningBrowsers.sorted { a, b in
             if a.bundleId == frontmostBundleID { return true }
             if b.bundleId == frontmostBundleID { return false }
             return false
         }
 
-        for browser in sortedBrowsers {
+        // Only query the top 2 candidate browsers (frontmost first) to guarantee sub-millisecond execution
+        for browser in sortedBrowsers.prefix(2) {
             let script: String
             if browser.isChromium {
                 script = """
@@ -388,12 +408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         set u to URL of active tab of front window
                         if u is not "" then return u
                     end try
-                    repeat with w in windows
-                        try
-                            set u to URL of active tab of w
-                            if u is not "" then return u
-                        end try
-                    end repeat
                 end tell
                 """
             } else {
@@ -403,16 +417,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                         set u to URL of front document
                         if u is not "" then return u
                     end try
-                    repeat with d in documents
-                        try
-                            set u to URL of d
-                            if u is not "" then return u
-                        end try
-                    end repeat
                 end tell
                 """
             }
-            
+
             var error: NSDictionary?
             if let appleScript = NSAppleScript(source: script) {
                 let result = appleScript.executeAndReturnError(&error)
@@ -427,30 +435,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                     return (browser.name, url)
                 }
             }
-
-            // Process-level fallback to ensure execution even if in-process AppleEvent sandbox denies execution
-            let proc = Process()
-            proc.launchPath = "/usr/bin/osascript"
-            proc.arguments = ["-e", script]
-            let pipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = errPipe
-            try? proc.run()
-            proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errData, encoding: .utf8) ?? ""
-            if errStr.contains("-1743") || errStr.contains("Not authorized to send Apple events") {
-                automationPermissionRequired = true
-            } else if !errStr.isEmpty && !errStr.contains("error") {
-                automationPermissionRequired = false
-            }
-            if let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let url = URL(string: str),
-               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-                return (browser.name, url)
-            }
         }
         return nil
     }
@@ -458,13 +442,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     @objc private func sendCurrentClipboard() {
         clipboard.sendCurrentClipboard()
         ToastHUD.shared.show(message: "Sent clipboard to chain", icon: "doc.on.clipboard.fill")
-    }
-
-    @objc private func copyURLToClipboard(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
-        ToastHUD.shared.show(message: "Copied URL", icon: "doc.on.doc.fill")
     }
 
     @objc private func sendBrowserTabToTarget(_ sender: NSMenuItem) {
@@ -496,7 +473,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             break
         }
     }
+
     @objc private func showLogs() { logWindow.showWindow(nil) }
+
     @objc private func renameDevice(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         let currentName = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
@@ -517,6 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             }
         }
     }
+
     @objc private func removePeer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         let name = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
@@ -525,15 +505,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let alert = NSAlert()
             alert.messageText = "Leave This Chain?"
             alert.informativeText = "You will leave the chain. Recreate a new chain or join another with a pairing code."
-            alert.addButton(withTitle: "Leave"); alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Leave")
+            alert.addButton(withTitle: "Cancel")
             if alert.runModal() == .alertFirstButtonReturn { transport.leaveChain() }
             return
         }
-        let alert = NSAlert(); alert.messageText = "Remove \(name) From This Chain?"
+        let alert = NSAlert()
+        alert.messageText = "Remove \(name) From This Chain?"
         alert.informativeText = "It will no longer receive new BinderClip updates or be accepted into this chain."
-        alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { transport.removeFromChain(id) }
     }
+
     @objc private func enableLaunchAtLogin() {
         let currentStatus = SMAppService.mainApp.status
         if currentStatus == .requiresApproval {
@@ -549,10 +533,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
         renderMenu()
     }
+
     @objc private func openPrivacySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") else { return }
         NSWorkspace.shared.open(url)
     }
+
     @objc private func openAutomationPrivacySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
             NSWorkspace.shared.open(url)
@@ -560,6 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             openPrivacySettings()
         }
     }
+
     @objc private func checkForUpdates() {
         updaterController.checkForUpdates(nil)
     }

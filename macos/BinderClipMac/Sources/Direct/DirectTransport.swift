@@ -223,6 +223,8 @@ final class DirectTransport {
             for (id, connection) in self.connections {
                 guard let context = self.contexts[id], context.peerID != nil else { continue }
                 if now.timeIntervalSince(context.lastActivity) > 45 {
+                    // A peer that stops responding is gone (left the chain, app
+                    // killed, route died). close() drops it from the roster.
                     self.log("Closing unresponsive peer connection", level: .warning)
                     self.close(connection)
                 } else {
@@ -232,6 +234,16 @@ final class DirectTransport {
         }
         timer.resume()
         heartbeatTimer = timer
+    }
+
+    /// Remove a peer from the roster, persist, and broadcast the removal so all
+    /// remaining members drop it too. Mirrors Android's host member watchdog.
+    private func removePeerFromRoster(_ peerID: String) {
+        guard peerID != localID else { return }
+        guard peers.removeValue(forKey: peerID) != nil else { return }
+        persistPeers(); publishPeers()
+        sendEncrypted(["type": "rosterRemove", "id": peerID], only: nil)
+        sendRoster(only: nil)
     }
 
     private static func isPermissionError(_ error: NWError) -> Bool {
@@ -837,7 +849,14 @@ final class DirectTransport {
         queue.async { [weak self] in
             guard let self else { return }; let id = ObjectIdentifier(connection)
             self.contexts[id]?.outboundTimeout?.cancel()
-            if let peerID = self.contexts[id]?.peerID, var peer = self.peers[peerID] { peer.connected = false; self.peers[peerID] = peer; self.persistPeers(); self.publishPeers() }
+            // A peer whose connection ended is gone from this chain (it left,
+            // was killed, or lost the route). Remove it from the roster instead
+            // of leaving a stale "(reconnecting)" entry. Deliberate removals
+            // (rosterRemove/leaveChain/stop) already cleared the peer, so this
+            // is a no-op there.
+            if let peerID = self.contexts[id]?.peerID {
+                self.removePeerFromRoster(peerID)
+            }
             self.contexts.removeValue(forKey: id); self.connections.removeValue(forKey: id); connection.cancel()
         }
     }

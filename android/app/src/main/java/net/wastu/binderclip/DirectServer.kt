@@ -81,6 +81,7 @@ class DirectServer(
     private val memberSockets = Collections.synchronizedMap(LinkedHashMap<String, Socket>())
     private val memberNames = Collections.synchronizedMap(LinkedHashMap<String, String>())
     private val states = Collections.synchronizedMap(LinkedHashMap<Socket, MemberState>())
+    private val kickedMembers = Collections.synchronizedSet(java.util.HashSet<String>())
 
     private class IncomingImage(val id: String, val mimeType: String, val bytes: Int, val sha256: String) {
         val data = java.io.ByteArrayOutputStream(bytes)
@@ -134,6 +135,7 @@ class DirectServer(
         memberSockets.clear()
         memberNames.clear()
         states.clear()
+        kickedMembers.clear()
         runCatching { transferScheduler?.shutdownNow() }
         transferScheduler = null
     }
@@ -245,6 +247,9 @@ class DirectServer(
         memberNames.remove(deviceId)
         states.remove(socket)
         store.removeMember(deviceId)
+        // Remember kicked members so a reconnect (without a fresh invite) is
+        // rejected: removal is enforced by roster admission on future sessions.
+        kickedMembers.add(deviceId)
         synchronized(writeLock) {
             val remove = DirectProtocol.seal(JSONObject().put("type", "rosterRemove").put("id", deviceId), key)
             // Notify the removed device itself so it leaves cleanly, then the rest.
@@ -387,7 +392,7 @@ class DirectServer(
 
     private fun acceptReturningMember(socket: Socket, output: DataOutputStream, key: ByteArray, hello: JSONObject, pairKey: ByteArray?) {
         val id = hello.optString("deviceID")
-        if (id.isBlank()) return
+        if (id.isBlank() || kickedMembers.contains(id)) return
         replaceMemberSocket(id, socket)
         memberSockets[id] = socket
         memberNames[id] = hello.optString("name", "Device")
@@ -426,6 +431,8 @@ class DirectServer(
                     val name = message.optString("name", "Device")
                     val platform = message.optString("platform", "Android")
                     if (id.isNotBlank()) {
+                        // A fresh invite handshake explicitly re-admits the member.
+                        kickedMembers.remove(id)
                         replaceMemberSocket(id, socket)
                         memberSockets[id] = socket
                         memberNames[id] = name

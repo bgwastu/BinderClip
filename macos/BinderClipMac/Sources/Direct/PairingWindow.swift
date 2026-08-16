@@ -11,6 +11,10 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     private var timer: Timer?
 
     func show(statusText: String = "Scan with BinderClip", invitationProvider: @escaping () -> URL?) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.show(statusText: statusText, invitationProvider: invitationProvider) }
+            return
+        }
         self.invitationProvider = invitationProvider
         if window == nil { buildWindow() }
         statusLabel?.stringValue = statusText

@@ -254,14 +254,47 @@ final class DirectTransport {
         })
         _ = sendSemaphore.wait(timeout: .now() + 5)
         if let sendError { contexts.removeValue(forKey: id); connections.removeValue(forKey: id); connection.cancel(); throw sendError }
-        // The host replies with its own hello; mark ourselves connected.
+        // The host replies with its own hello; wait for it so a rejected
+        // reconnect (kicked member, rotated key) is not reported as success.
+        let replySemaphore = DispatchSemaphore(value: 0)
+        var verified = false
+        var replyBuffer = Data()
+        connection.receive(minimumIncompleteLength: 1, maximumLength: FrameCodec.maximumPayloadBytes + 4) { [weak self] data, _, _, error in
+            defer { replySemaphore.signal() }
+            guard let self, let data else { return }
+            replyBuffer.append(data)
+            var buffer = data
+            do {
+                while let frame = try FrameCodec.decode(from: &buffer) {
+                    guard let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else { continue }
+                    let opened = try DirectCrypto.open(object, key: self.groupKey)
+                    if opened["type"] as? String == "hello" {
+                        verified = true
+                        self.queue.async { [weak self] in
+                            guard let self, let hostTarget = self.hostTarget else { return }
+                            self.contexts[id]?.peerID = hostTarget.id
+                            self.peers[hostTarget.id] = Peer(id: hostTarget.id, name: hostTarget.name, endpoint: endpoint, connected: true, platform: "Android")
+                            self.persistPeers(); self.publishPeers()
+                        }
+                    }
+                }
+            } catch {}
+        }
+        _ = replySemaphore.wait(timeout: .now() + 6)
         queue.async { [weak self] in
             guard let self else { return }
+            guard verified else {
+                self.contexts.removeValue(forKey: id); self.connections.removeValue(forKey: id); connection.cancel()
+                return
+            }
             guard let hostTarget = self.hostTarget else { return }
-            self.contexts[id]?.peerID = hostTarget.id
-            self.contexts[id]?.receiveStarted = false
-            if self.contexts[id]?.receiveStarted == false {
-                self.contexts[id]?.receiveStarted = true
+            let cid = id
+            if !replyBuffer.isEmpty {
+                self.contexts[cid]?.buffer.append(replyBuffer)
+            }
+            self.contexts[cid]?.receiveStarted = false
+            if self.contexts[cid]?.receiveStarted == false {
+                self.contexts[cid]?.receiveStarted = true
                 self.receive(connection)
             }
             self.reconnectAttempt = 0

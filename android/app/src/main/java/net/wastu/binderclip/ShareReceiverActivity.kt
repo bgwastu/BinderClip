@@ -63,16 +63,41 @@ class ShareReceiverActivity : ComponentActivity() {
 
         val payload = when (intent.action) {
             Intent.ACTION_SEND -> {
-                val stream = (if (android.os.Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(
-                    Intent.EXTRA_STREAM,
-                    Uri::class.java
-                )
-                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
-                    ?: intent.clipData?.getItemAt(0)?.uri
+                val extraText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+                val extraStream = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                }
+                val intentType = intent.type?.lowercase()
+
                 when {
-                    stream != null -> ImageClipboard.readUri(this, stream, intent.type)?.let(SharedPayload::Image)
-                    intent.type == "text/plain" -> intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-                        ?.takeIf { it.isNotBlank() }?.let(SharedPayload::Text)
+                    // 1. Explicit text or URL share: If EXTRA_TEXT is present and the intent is text/plain or has no image stream,
+                    // prioritize the text/URL over any auxiliary thumbnail/favicon attached in clipData.
+                    extraText != null && (intentType == null || intentType == "text/plain" || !intentType.startsWith("image/") || extraStream == null) -> {
+                        SharedPayload.Text(extraText)
+                    }
+
+                    // 2. Explicit image share with EXTRA_STREAM (e.g. from Photos or Gallery)
+                    extraStream != null && (intentType == null || intentType.startsWith("image/") || intentType == "*/*") -> {
+                        ImageClipboard.readUri(this, extraStream, intentType)?.let(SharedPayload::Image)
+                            ?: extraText?.let(SharedPayload::Text)
+                    }
+
+                    // 3. Fallback to clipData items (checking text first, then URI)
+                    intent.clipData != null && intent.clipData!!.itemCount > 0 -> {
+                        val item = intent.clipData!!.getItemAt(0)
+                        val clipText = item.text?.toString()?.takeIf { it.isNotBlank() }
+                        val clipUri = item.uri
+                        when {
+                            clipText != null -> SharedPayload.Text(clipText)
+                            clipUri != null -> ImageClipboard.readUri(this, clipUri, intentType)?.let(SharedPayload::Image)
+                            else -> null
+                        }
+                    }
+
+                    // 4. Any remaining EXTRA_TEXT
+                    extraText != null -> SharedPayload.Text(extraText)
 
                     else -> null
                 }
@@ -96,9 +121,9 @@ class ShareReceiverActivity : ComponentActivity() {
         }.distinctBy { it.deviceId }.filter { it.deviceId != store.deviceId }
 
         val isUrl = payload is SharedPayload.Text && (
-                (payload.value.trim().lowercase().startsWith("http://") || payload.value.trim().lowercase()
-                    .startsWith("https://")) &&
-                        android.util.Patterns.WEB_URL.matcher(payload.value.trim()).matches()
+                payload.value.trim().lowercase().startsWith("http://") ||
+                payload.value.trim().lowercase().startsWith("https://") ||
+                android.util.Patterns.WEB_URL.matcher(payload.value.trim()).matches()
                 )
 
         // If no paired remote peers or only 1 remote peer and not a URL, we can send immediately.

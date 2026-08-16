@@ -34,11 +34,17 @@ object RootClipboardBridge {
         android.os.Process.myUid() / 100000
     }.getOrDefault(0)
 
+    private val suPaths = listOf("su", "/system/bin/su", "/system/xbin/su", "/data/adb/ksu/bin/su")
+
     fun isAvailable(): Boolean = runCatching {
-        val process = ProcessBuilder("su", "-c", "id -u").redirectErrorStream(true).start()
-        val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
-        process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0 &&
-            output.lines().any { it.trim() == "0" || it.contains("uid=0(") }
+        suPaths.any { path ->
+            runCatching {
+                val process = ProcessBuilder(path, "-c", "id -u").redirectErrorStream(true).start()
+                val output = BufferedReader(InputStreamReader(process.inputStream)).readText().trim()
+                process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0 &&
+                    output.lines().any { it.trim() == "0" || it.contains("uid=0(") }
+            }.getOrDefault(false)
+        }
     }.getOrDefault(false)
 
     fun enableBackgroundAccess(context: Context): Boolean {
@@ -77,6 +83,18 @@ object RootClipboardBridge {
         val item = clip.takeIf { it.itemCount > 0 }?.getItemAt(0) ?: return null
         val imageMime = clip.description?.filterMimeTypes("image/*")
             ?.firstOrNull { it in ImagePayload.ALLOWED_MIME_TYPES }
+        val directText = item.text?.toString()?.takeIf { it.isNotBlank() }
+
+        // 1. Direct text / URL precedence
+        if (directText != null) {
+            val trimmed = directText.trim().lowercase()
+            if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || imageMime == null) {
+                ignoredUnreadableImage = null
+                return Clip.Text(directText)
+            }
+        }
+
+        // 2. Image content
         if (imageMime != null || item.uri != null) {
             val scheme = item.uri?.scheme?.lowercase()
             if (scheme == "content" || scheme == "file" || imageMime != null) {
@@ -96,20 +114,22 @@ object RootClipboardBridge {
             }
         }
         ignoredUnreadableImage = null
-        val text = item.text?.toString()?.takeIf { it.isNotBlank() }
-            ?: runCatching { item.coerceToText(context)?.toString() }.getOrNull()?.takeIf { it.isNotBlank() }
+        val text = directText ?: runCatching { item.coerceToText(context)?.toString() }.getOrNull()?.takeIf { it.isNotBlank() }
         text?.let(Clip::Text)
     }.getOrNull()
 
     private fun runRootCommand(command: String): Boolean = runCatching {
-        val process = ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
-        val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
-        val finished = process.waitFor(5, TimeUnit.SECONDS)
-        val success = finished && process.exitValue() == 0
-        if (!success) {
-            DiagnosticLog.warning("Root command failed ($command): code=${if (finished) process.exitValue() else "timeout"}, out=${output.trim()}")
+        for (path in suPaths) {
+            val success = runCatching {
+                val process = ProcessBuilder(path, "-c", command).redirectErrorStream(true).start()
+                val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
+                val finished = process.waitFor(5, TimeUnit.SECONDS)
+                finished && process.exitValue() == 0
+            }.getOrDefault(false)
+            if (success) return true
         }
-        success
+        DiagnosticLog.warning("Root command failed ($command)")
+        false
     }.getOrElse {
         DiagnosticLog.warning("Root command exception ($command): ${it.message}")
         false

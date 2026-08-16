@@ -86,6 +86,7 @@ class BinderClipService : Service() {
     private val reconnectExecutor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val reconnectAttempts = AtomicInteger(0)
     private var scheduledReconnectFuture: ScheduledFuture<*>? = null
+    private var networkDebounceFuture: ScheduledFuture<*>? = null
     private var meshScanFuture: ScheduledFuture<*>? = null
 
     @Volatile
@@ -177,7 +178,7 @@ class BinderClipService : Service() {
                     this
                 )
             if (store.hosting && store.groupKey != null) {
-                if (uiVisible) server.start()
+                server.start()
             } else if (store.peer != null) {
                 resetReconnectBackoffAndTrigger("service_create")
             }
@@ -267,10 +268,8 @@ class BinderClipService : Service() {
             ACTION_UI_VISIBLE -> {
                 uiVisible = intent?.getBooleanExtra("visible", false) ?: false
                 if (uiVisible) {
-                    if (store.hosting && store.groupKey != null) executor.execute { server.start() }
+                    if (store.hosting && store.groupKey != null && !server.isRunning) executor.execute { server.start() }
                     if (!client.isConnected() && !store.hosting) resetReconnectBackoffAndTrigger("ui_visible")
-                } else if (store.hosting) {
-                    executor.execute { server.stop() }
                 }
             }
 
@@ -361,7 +360,7 @@ class BinderClipService : Service() {
         server.stop()
         client.close()
         store.createNewChain()
-        if (uiVisible) {
+        executor.execute {
             server.start()
             server.createInvite()
         }
@@ -410,17 +409,24 @@ class BinderClipService : Service() {
         }
     }
 
-    /** Close the current connection and reconnect immediately so a network
-     *  change never leaves the UI showing a stale "connected" state. */
+    /** Close the current connection and reconnect immediately with 500ms debounce so a network
+     *  change never leaves the UI showing a stale "connected" state or creates a reconnect storm. */
     private fun forceReconnect(reason: String) {
-        reconnectAttempts.set(0)
-        scheduledReconnectFuture?.cancel(false)
-        scheduledReconnectFuture = null
-        if (store.peer != null && !store.hosting) {
-            executor.execute {
-                client.reconnect()
+        networkDebounceFuture?.cancel(false)
+        networkDebounceFuture = reconnectExecutor.schedule({
+            reconnectAttempts.set(0)
+            scheduledReconnectFuture?.cancel(false)
+            scheduledReconnectFuture = null
+            if (store.peer != null && !store.hosting) {
+                executor.execute {
+                    client.reconnect()
+                }
+            } else if (store.hosting && store.groupKey != null && !server.isRunning) {
+                executor.execute {
+                    server.start()
+                }
             }
-        }
+        }, 500, TimeUnit.MILLISECONDS)
     }
 
     private fun unregisterNetworkCallback() {

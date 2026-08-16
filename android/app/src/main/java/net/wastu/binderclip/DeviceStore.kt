@@ -70,12 +70,26 @@ class DeviceStore(context: Context) {
     var peer: RememberedPeer?
         get() {
             val host = prefs.getString("peer_host", null) ?: return null
-            return RememberedPeer(prefs.getString("peer_name", "Mac")!!, host, prefs.getInt("peer_port", 39_421), prefs.getString("peer_id", "")!!)
+            return RememberedPeer(
+                name = prefs.getString("peer_name", "Mac") ?: "Mac",
+                host = host,
+                port = prefs.getInt("peer_port", 39_421),
+                deviceId = prefs.getString("peer_id", "") ?: "",
+                platform = prefs.getString("peer_platform", "macOS") ?: "macOS",
+                connected = prefs.getBoolean("peer_connected", false)
+            )
         }
         set(value) = prefs.edit().apply {
             if (value == null) {
-                remove("peer_name"); remove("peer_host"); remove("peer_port"); remove("peer_id")
-            } else { putString("peer_name", value.name); putString("peer_host", value.host); putInt("peer_port", value.port); putString("peer_id", value.deviceId) }
+                remove("peer_name"); remove("peer_host"); remove("peer_port"); remove("peer_id"); remove("peer_platform"); remove("peer_connected")
+            } else {
+                putString("peer_name", value.name)
+                putString("peer_host", value.host)
+                putInt("peer_port", value.port)
+                putString("peer_id", value.deviceId)
+                putString("peer_platform", value.platform)
+                putBoolean("peer_connected", value.connected)
+            }
         }.apply()
 
     /** Alternate addresses for the primary peer (mesh + LAN + …) so reconnect can
@@ -119,6 +133,11 @@ class DeviceStore(context: Context) {
     fun upsertMembers(incoming: List<RememberedPeer>) {
         val merged = (members.associateBy { it.deviceId } + incoming.associateBy { it.deviceId }).values.take(8)
         members = merged
+    }
+    fun updateMemberConnectionState(deviceId: String, isConnected: Boolean) {
+        members = members.map {
+            if (it.deviceId == deviceId) it.copy(connected = isConnected) else it
+        }
     }
     fun removeMember(deviceId: String) { members = members.filterNot { it.deviceId == deviceId } }
 

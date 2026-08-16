@@ -40,7 +40,6 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AccessibilityNew
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.BatteryChargingFull
-import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.LaptopMac
@@ -112,7 +111,6 @@ class MainActivity : AppCompatActivity() {
             BinderClipTheme {
                 val state by AppRuntime.state.collectAsState()
                 val revision = permissionRevision
-                val cameraGranted = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
                 val notificationsGranted =
                     Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
                 val power = getSystemService(PowerManager::class.java)
@@ -130,13 +128,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 BinderClipScreen(
                     state = state,
-                    cameraGranted = cameraGranted,
                     notificationsGranted = notificationsGranted,
                     batteryOptimizationIgnored = batteryOptimizationIgnored,
                     autoStartHelpNeeded = autoStartHelpNeeded,
                     permissionRevision = revision,
                     onScan = ::scan,
-                    onRequestCamera = { requestCamera.launch(Manifest.permission.CAMERA) },
                     onRequestNotifications = { if (Build.VERSION.SDK_INT >= 33) requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) },
                     onOpenAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                     onRequestBatteryOptimization = ::requestBatteryOptimization,
@@ -308,13 +304,11 @@ class MainActivity : AppCompatActivity() {
 @Composable
 private fun BinderClipScreen(
     state: AppState,
-    cameraGranted: Boolean,
     notificationsGranted: Boolean,
     batteryOptimizationIgnored: Boolean,
     autoStartHelpNeeded: Boolean,
     permissionRevision: Int,
     onScan: () -> Unit,
-    onRequestCamera: () -> Unit,
     onRequestNotifications: () -> Unit,
     onOpenAccessibility: () -> Unit,
     onRequestBatteryOptimization: () -> Unit,
@@ -333,40 +327,37 @@ private fun BinderClipScreen(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    var selectedDevice by remember { mutableStateOf<RememberedPeer?>(null) }
+    var selectedDeviceId by remember { mutableStateOf<String?>(null) }
     var showLogs by remember { mutableStateOf(false) }
     val pairingUrl by AppRuntime.pairingUrl.collectAsState()
     val diagnosticEvents by DiagnosticLog.events.collectAsState()
     val devices = buildList {
         // Exclude synthetic alternate-host entries (used only as reconnect
         // candidates) so they don't appear as duplicate devices in the list.
-        addAll(state.members.filter { !it.deviceId.contains('@') })
         state.peer?.let(::add)
+        addAll(state.members.filter { !it.deviceId.contains('@') })
         if ((state.peer != null || state.hosting) && none { it.deviceId == state.localDeviceId }) add(
             RememberedPeer(
-                DeviceNames.android(
-                    context
-                ), localIpAddress(context), 39_421, state.localDeviceId, "Android", true
+                DeviceNames.android(context),
+                localIpAddress(context),
+                39_421,
+                state.localDeviceId,
+                "Android",
+                true
             )
         )
-    }.map { device ->
-        if (device.deviceId == state.localDeviceId) device.copy(
-            name = DeviceNames.android(context),
-            platform = "Android"
-        ) else device
     }.distinctBy { it.deviceId }
+        .map { device ->
+            if (device.deviceId == state.localDeviceId) device.copy(
+                name = DeviceNames.android(context),
+                host = localIpAddress(context),
+                platform = "Android"
+            ) else device
+        }
         .sortedWith(compareByDescending<RememberedPeer> { it.deviceId == state.localDeviceId }.thenBy { it.name.lowercase() })
     // Read so the composition updates immediately after Android's permission result.
     permissionRevision.hashCode()
     val missingPermissions = buildList {
-        if (!cameraGranted) add(
-            PermissionNeed(
-                "Camera",
-                "Scan pairing codes",
-                Icons.Outlined.CameraAlt,
-                onRequestCamera
-            )
-        )
         if (!notificationsGranted) add(
             PermissionNeed(
                 "Notifications",
@@ -469,7 +460,7 @@ private fun BinderClipScreen(
                     DeviceRow(
                         device,
                         isCurrentDevice = device.deviceId == state.localDeviceId,
-                        onClick = { selectedDevice = device })
+                        onClick = { selectedDeviceId = device.deviceId })
                 }
                 if (devices.isNotEmpty()) item { Spacer(Modifier.height(12.dp)) }
             item {
@@ -550,7 +541,7 @@ private fun BinderClipScreen(
                             onChanged = { enabled -> if (enabled) onOpenAccessibility() else onDisableAccessibility() },
                         )
                         Text(
-                            "Tip: You can also use the notification action or share sheet to send content instantly without root.",
+                            "Tip: You can also use the notification action or share sheet to send content instantly.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
@@ -585,7 +576,7 @@ private fun BinderClipScreen(
                                     imageVector = Icons.Outlined.CheckCircle,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
                             } else {
                                 androidx.compose.material3.CircularProgressIndicator(
@@ -606,12 +597,13 @@ private fun BinderClipScreen(
             }
         }
     }
+    val selectedDevice = devices.firstOrNull { it.deviceId == selectedDeviceId }
     var deviceToRename by remember { mutableStateOf<RememberedPeer?>(null) }
     var renameInput by remember { mutableStateOf("") }
     selectedDevice?.let { target ->
         val isCurrentDevice = target.deviceId == state.localDeviceId
         AlertDialog(
-            onDismissRequest = { selectedDevice = null },
+            onDismissRequest = { selectedDeviceId = null },
             title = { Text(target.name) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -624,14 +616,14 @@ private fun BinderClipScreen(
                     TextButton(onClick = {
                         renameInput = target.name
                         deviceToRename = target
-                        selectedDevice = null
+                        selectedDeviceId = null
                     }) { Text("Rename") }
                     TextButton(onClick = {
-                        onRemove(target.deviceId); selectedDevice = null
+                        onRemove(target.deviceId); selectedDeviceId = null
                     }) { Text(if (isCurrentDevice) "Leave Chain" else "Remove From Chain") }
                 }
             },
-            dismissButton = { TextButton(onClick = { selectedDevice = null }) { Text("Close") } },
+            dismissButton = { TextButton(onClick = { selectedDeviceId = null }) { Text("Close") } },
         )
     }
     deviceToRename?.let { target ->

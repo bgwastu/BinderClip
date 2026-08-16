@@ -19,8 +19,18 @@ object ClipboardClassifier {
         val clip = clipboard.primaryClip ?: return LocalClipboardContent.Unsupported
         val item = clip.takeIf { it.itemCount > 0 }?.getItemAt(0) ?: return LocalClipboardContent.Unsupported
 
-        // 1. Check for image content (via image MIME description or URI)
         val hasImageMime = clip.description?.filterMimeTypes("image/*")?.isNotEmpty() == true
+        val directText = item.text?.toString()?.takeIf { it.isNotBlank() }
+
+        // 1. Direct text / URL precedence: If plain text contains an HTTP/HTTPS URL or description is text-only, prioritize text
+        if (directText != null) {
+            val trimmed = directText.trim().lowercase()
+            if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || !hasImageMime) {
+                return LocalClipboardContent.Text(directText)
+            }
+        }
+
+        // 2. Image content (via image MIME description, file URI, or image content URI)
         if (item.uri != null) {
             val scheme = item.uri.scheme?.lowercase()
             if (scheme == "content" || scheme == "file" || hasImageMime) {
@@ -34,13 +44,12 @@ object ClipboardClassifier {
             }
         }
 
-        // 2. Direct plain text
-        val directText = item.text?.toString()?.takeIf { it.isNotBlank() }
+        // 3. Fallback to direct plain text
         if (directText != null) {
             return LocalClipboardContent.Text(directText)
         }
 
-        // 3. Coerced text (HTML or formatted text)
+        // 4. Coerced text (HTML or formatted text)
         val coerced = runCatching { item.coerceToText(context)?.toString() }.getOrNull()?.takeIf { it.isNotBlank() }
         if (coerced != null) {
             return LocalClipboardContent.Text(coerced)

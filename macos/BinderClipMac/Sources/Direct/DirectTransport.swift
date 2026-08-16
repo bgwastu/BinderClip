@@ -42,6 +42,17 @@ struct HostTarget: Codable {
     }
 }
 
+final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    func compareAndSet(expected: Bool, newValue: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if flag == expected { flag = newValue; return true }
+        return false
+    }
+}
+
 /// Single-purpose direct TCP listener. Every post-pairing payload is AES-GCM
 /// encrypted with a group key received only through a one-time QR invitation.
 final class DirectTransport {
@@ -88,6 +99,7 @@ final class DirectTransport {
     private var localName: String
     private var listener: NWListener?
     private var pathMonitor: NWPathMonitor?
+    private var pathDebounceWorkItem: DispatchWorkItem?
     private var heartbeatTimer: DispatchSourceTimer?
     private var rosterRefreshTimer: DispatchSourceTimer?
     private var reconnectTimer: DispatchSourceTimer?
@@ -185,8 +197,6 @@ final class DirectTransport {
     private func tryReconnect() {
         guard let hostTarget else { return }
         if isConnectedToHost() { reconnectAttempt = 0; return }
-        // Run the handshake off the transport queue so the semaphore-based
-        // connection setup doesn't block the queue that NWConnection uses.
         let reconnectQueue = DispatchQueue(label: "net.wastu.binderclip.reconnect")
         reconnectQueue.async { [weak self] in
             self?.reconnect(to: hostTarget)
@@ -194,112 +204,188 @@ final class DirectTransport {
     }
 
     /// Reconnect as a returning member using the stored group key and the
-    /// host's candidate endpoints. No fresh invite is needed: membership is
-    /// proven by encrypting the hello with the group key.
+    /// host's candidate endpoints. Concurrently races all candidate endpoints
+    /// (LAN IP, Mesh VPN, previous endpoints) using Happy Eyeballs.
     private func reconnect(to target: HostTarget) {
         guard !target.endpoints.isEmpty else { return }
         let key = groupKey
-        var lastError: Error?
-        for endpoint in target.endpoints {
-            do {
-                try reconnectHost(endpoint: endpoint, key: key)
-                return
-            } catch {
-                lastError = error
+        let hostID = target.id
+        let hostName = target.name
+        let candidateEndpoints = target.endpoints
+        let raceWinner = AtomicFlag()
+        let raceQueue = DispatchQueue(label: "net.wastu.binderclip.reconnect-race", attributes: .concurrent)
+
+        let sortedEndpoints = candidateEndpoints.sorted { (a, b) -> Bool in
+            let pa = Self.endpointPriority(a.host)
+            let pb = Self.endpointPriority(b.host)
+            return pa == pb ? a.host < b.host : pa < pb
+        }
+
+        for endpoint in sortedEndpoints {
+            let priority = Self.endpointPriority(endpoint.host)
+            let stagger = priority == 0 ? 0.0 : (priority == 1 ? 0.15 : 0.30)
+            raceQueue.asyncAfter(deadline: .now() + stagger) { [weak self] in
+                guard let self, !raceWinner.get() else { return }
+                self.attemptReconnectEndpoint(
+                    endpoint: endpoint,
+                    hostID: hostID,
+                    hostName: hostName,
+                    key: key,
+                    winnerClaimed: raceWinner
+                )
             }
         }
-        log("Reconnect to \(target.name) failed\(lastError.map { ": \($0.localizedDescription)" } ?? "")", level: .warning)
-        transferStatus("Reconnecting to \(target.name)…")
     }
 
-    private func reconnectHost(endpoint: DirectEndpoint, key: Data) throws {
-        // Close any existing connection to avoid duplicates.
-        for connection in connections.values where contexts[ObjectIdentifier(connection)]?.peerID == hostTarget?.id {
-            close(connection)
-        }
-        let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: NWEndpoint.Port(rawValue: endpoint.port)!, using: .tcp)
-        let id = ObjectIdentifier(connection)
-        contexts[id] = Context(); connections[id] = connection
-        let semaphore = DispatchSemaphore(value: 0)
-        var connectError: Error?
-        // Wait for the connection to become ready (or fail).
-        var ready = false
-        connection.stateUpdateHandler = { state in
-            if case .ready = state {
-                ready = true
-                semaphore.signal()
-            } else if case .failed(let error) = state {
-                connectError = error
-                semaphore.signal()
-            } else if case .waiting(let error) = state {
-                connectError = error
-                semaphore.signal()
+    private func attemptReconnectEndpoint(
+        endpoint: DirectEndpoint,
+        hostID: String,
+        hostName: String,
+        key: Data,
+        winnerClaimed: AtomicFlag
+    ) {
+        guard let port = NWEndpoint.Port(rawValue: endpoint.port) else { return }
+        let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: .tcp)
+        let workQueue = DispatchQueue(label: "net.wastu.binderclip.reconnect.\(endpoint.host)")
+
+        let connectionTimeout = DispatchWorkItem {
+            if !winnerClaimed.get() {
+                connection.cancel()
             }
         }
-        connection.start(queue: queue)
-        // Give the connection a few seconds to establish.
-        _ = semaphore.wait(timeout: .now() + 5)
-        guard ready else {
-            contexts.removeValue(forKey: id); connections.removeValue(forKey: id); connection.cancel()
-            throw connectError ?? DirectCryptoError.malformed
+        workQueue.asyncAfter(deadline: .now() + 3.5, execute: connectionTimeout)
+
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .ready:
+                connectionTimeout.cancel()
+                if winnerClaimed.get() {
+                    connection.cancel()
+                    return
+                }
+                self.performHandshakeOnCandidate(
+                    connection: connection,
+                    endpoint: endpoint,
+                    hostID: hostID,
+                    hostName: hostName,
+                    key: key,
+                    winnerClaimed: winnerClaimed,
+                    workQueue: workQueue
+                )
+            case .failed, .cancelled:
+                connectionTimeout.cancel()
+            default:
+                break
+            }
         }
-        // Send an encrypted hello proving group-key membership.
-        let helloPayload = try DirectCrypto.seal(["type": "hello", "deviceID": localID, "name": localName, "platform": "macOS"], key: key)
-        let helloFrame = try FrameCodec.encode(try JSONSerialization.data(withJSONObject: helloPayload))
-        let sendSemaphore = DispatchSemaphore(value: 0)
-        var sendError: Error?
-        connection.send(content: helloFrame, completion: .contentProcessed { error in
-            if let error { sendError = error }
-            sendSemaphore.signal()
-        })
-        _ = sendSemaphore.wait(timeout: .now() + 5)
-        if let sendError { contexts.removeValue(forKey: id); connections.removeValue(forKey: id); connection.cancel(); throw sendError }
-        // The host replies with its own hello; wait for it so a rejected
-        // reconnect (kicked member, rotated key) is not reported as success.
-        let replySemaphore = DispatchSemaphore(value: 0)
-        var verified = false
-        var replyBuffer = Data()
-        connection.receive(minimumIncompleteLength: 1, maximumLength: FrameCodec.maximumPayloadBytes + 4) { [weak self] data, _, _, error in
-            defer { replySemaphore.signal() }
-            guard let self, let data else { return }
-            replyBuffer.append(data)
-            var buffer = data
-            do {
-                while let frame = try FrameCodec.decode(from: &buffer) {
-                    guard let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else { continue }
-                    let opened = try DirectCrypto.open(object, key: self.groupKey)
-                    if opened["type"] as? String == "hello" {
-                        verified = true
-                        self.queue.async { [weak self] in
-                            guard let self, let hostTarget = self.hostTarget else { return }
-                            self.contexts[id]?.peerID = hostTarget.id
-                            self.peers[hostTarget.id] = Peer(id: hostTarget.id, name: hostTarget.name, endpoint: endpoint, connected: true, platform: "Android")
-                            self.persistPeers(); self.publishPeers()
+        connection.start(queue: workQueue)
+    }
+
+    private func performHandshakeOnCandidate(
+        connection: NWConnection,
+        endpoint: DirectEndpoint,
+        hostID: String,
+        hostName: String,
+        key: Data,
+        winnerClaimed: AtomicFlag,
+        workQueue: DispatchQueue
+    ) {
+        do {
+            let helloPayload = try DirectCrypto.seal([
+                "type": "hello",
+                "deviceID": localID,
+                "name": localName,
+                "platform": "macOS",
+                "hosts": Self.localAddresses()
+            ], key: key)
+            let helloFrame = try FrameCodec.encode(try JSONSerialization.data(withJSONObject: helloPayload))
+            connection.send(content: helloFrame, completion: .contentProcessed { [weak self, weak connection] error in
+                guard let self, let connection, error == nil else {
+                    connection?.cancel()
+                    return
+                }
+                if winnerClaimed.get() {
+                    connection.cancel()
+                    return
+                }
+                var receiveBuffer = Data()
+                func readReply() {
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: FrameCodec.maximumPayloadBytes + 4) { [weak self, weak connection] data, _, _, error in
+                        guard let self, let connection else { return }
+                        if error != nil || winnerClaimed.get() {
+                            connection.cancel()
+                            return
+                        }
+                        if let data { receiveBuffer.append(data) }
+                        var buffer = receiveBuffer
+                        do {
+                            while let frame = try FrameCodec.decode(from: &buffer) {
+                                guard let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else { continue }
+                                let opened = try DirectCrypto.open(object, key: key)
+                                if opened["type"] as? String == "hello" {
+                                    if winnerClaimed.compareAndSet(expected: false, newValue: true) {
+                                        self.adoptReconnectedHost(
+                                            connection: connection,
+                                            endpoint: endpoint,
+                                            hostID: hostID,
+                                            hostName: hostName,
+                                            leftoverBuffer: buffer
+                                        )
+                                        return
+                                    } else {
+                                        connection.cancel()
+                                        return
+                                    }
+                                }
+                            }
+                            receiveBuffer = buffer
+                            readReply()
+                        } catch {
+                            connection.cancel()
                         }
                     }
                 }
-            } catch {}
+                readReply()
+            })
+        } catch {
+            connection.cancel()
         }
-        _ = replySemaphore.wait(timeout: .now() + 6)
+    }
+
+    private func adoptReconnectedHost(
+        connection: NWConnection,
+        endpoint: DirectEndpoint,
+        hostID: String,
+        hostName: String,
+        leftoverBuffer: Data
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
-            guard verified else {
-                self.contexts.removeValue(forKey: id); self.connections.removeValue(forKey: id); connection.cancel()
-                return
+            for (cid, oldConn) in self.connections where self.contexts[cid]?.peerID == hostID {
+                self.contexts.removeValue(forKey: cid)
+                self.connections.removeValue(forKey: cid)
+                oldConn.cancel()
             }
-            guard let hostTarget = self.hostTarget else { return }
-            let cid = id
-            if !replyBuffer.isEmpty {
-                self.contexts[cid]?.buffer.append(replyBuffer)
+            let cid = ObjectIdentifier(connection)
+            let context = Context()
+            context.peerID = hostID
+            context.lastActivity = Date()
+            if !leftoverBuffer.isEmpty {
+                context.buffer.append(leftoverBuffer)
             }
-            self.contexts[cid]?.receiveStarted = false
-            if self.contexts[cid]?.receiveStarted == false {
-                self.contexts[cid]?.receiveStarted = true
-                self.receive(connection)
-            }
+            self.contexts[cid] = context
+            self.connections[cid] = connection
+            self.peers[hostID] = Peer(id: hostID, name: hostName, endpoint: endpoint, connected: true, platform: "Android")
+            self.persistPeers()
+            self.publishPeers()
             self.reconnectAttempt = 0
-            self.transferStatus("Reconnected to \(hostTarget.name)")
-            self.log("Reconnected to \(hostTarget.name)")
+            self.transferStatus("Reconnected to \(hostName)")
+            self.log("Reconnected to \(hostName) via \(endpoint.host)")
+
+            context.receiveStarted = true
+            self.receive(connection)
+            self.sendRoster(only: nil)
         }
     }
 
@@ -345,20 +431,26 @@ final class DirectTransport {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             self.queue.async {
-                // Re-broadcast the roster whenever the network path changes (new
-                // Wi-Fi, mesh interface came up, IP rotated) so the invite and
-                // roster always carry the current mesh/LAN addresses.
-                if path.status == .satisfied {
-                    self.sendRoster(only: nil)
-                } else {
-                    // Mark peers disconnected on path loss so the UI dims them.
-                    for (id, var peer) in self.peers where peer.connected {
-                        peer.connected = false
-                        self.peers[id] = peer
+                self.pathDebounceWorkItem?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    if path.status == .satisfied {
+                        self.sendRoster(only: nil)
+                        if self.hostTarget != nil && !self.isConnectedToHost() {
+                            self.tryReconnect()
+                        }
+                    } else {
+                        // Mark peers disconnected on path loss so the UI dims them.
+                        for (id, var peer) in self.peers where peer.connected {
+                            peer.connected = false
+                            self.peers[id] = peer
+                        }
+                        self.persistPeers()
+                        self.publishPeers()
                     }
-                    self.persistPeers()
-                    self.publishPeers()
                 }
+                self.pathDebounceWorkItem = item
+                self.queue.asyncAfter(deadline: .now() + 0.5, execute: item)
             }
         }
         monitor.start(queue: queue)
@@ -378,16 +470,15 @@ final class DirectTransport {
     private func startHeartbeats() {
         guard heartbeatTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.schedule(deadline: .now() + 25, repeating: 25)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Date()
             for (id, connection) in self.connections {
                 guard let context = self.contexts[id], context.peerID != nil else { continue }
-                if now.timeIntervalSince(context.lastActivity) > 45 {
-                    // A peer that stops responding is gone (left the chain, app
-                    // killed, route died). close() drops it from the roster.
-                    self.log("Closing unresponsive peer connection", level: .warning)
+                if now.timeIntervalSince(context.lastActivity) > 60 {
+                    // Socket inactive: close socket to trigger reconnect without evicting peer from roster.
+                    self.log("Peer connection inactive — closing socket to reconnect", level: .warning)
                     self.close(connection)
                 } else {
                     self.sendEncrypted(["type": "ping", "timestamp": UInt64(now.timeIntervalSince1970 * 1000)], only: connection)
@@ -756,6 +847,17 @@ final class DirectTransport {
         }
     }
 
+    private func relayEncrypted(_ message: [String: Any], except senderConnection: NWConnection, targetDeviceId: String?) {
+        guard let encrypted = try? DirectCrypto.seal(message, key: groupKey) else { return }
+        let senderID = ObjectIdentifier(senderConnection)
+        for (connID, connection) in connections where connID != senderID {
+            guard let peerID = contexts[connID]?.peerID else { continue }
+            if targetDeviceId == nil || targetDeviceId == peerID {
+                send(encrypted, to: connection)
+            }
+        }
+    }
+
     private func handle(_ frame: Data, connection: NWConnection, context: Context) throws {
         guard let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else { throw DirectCryptoError.malformed }
         if object["type"] as? String == "invite" { try handleInvite(object, connection: connection, context: context); return }
@@ -765,18 +867,35 @@ final class DirectTransport {
         case "hello":
             guard let id = message["deviceID"] as? String, let name = message["name"] as? String,
                   id != localID, !id.isEmpty else { throw DirectCryptoError.authentication }
-            // Decryption with the group key already proves membership, so a
-            // returning member reconnecting without a fresh invite is accepted.
             let firstHello = context.peerID == nil
             context.peerID = id
             let endpoint: DirectEndpoint
             if let remote = connection.currentPath?.remoteEndpoint,
                case let .hostPort(host, port) = remote {
-                endpoint = DirectEndpoint(host: host.debugDescription, port: port.rawValue)
+                var cleanHost = host.debugDescription
+                if let percentIdx = cleanHost.firstIndex(of: "%") {
+                    cleanHost = String(cleanHost[..<percentIdx])
+                }
+                endpoint = DirectEndpoint(host: cleanHost, port: port.rawValue)
             } else {
                 endpoint = DirectEndpoint(host: "unknown", port: Self.port)
             }
             peers[id] = Peer(id: id, name: name, endpoint: endpoint, connected: true, platform: message["platform"] as? String ?? "Android")
+            
+            // Learn any candidate hosts advertised by this peer
+            if let hostList = message["hosts"] as? [String], !hostList.isEmpty {
+                if hostTarget?.id == id {
+                    var currentEndpoints = hostTarget?.endpoints ?? []
+                    for h in hostList where !h.isEmpty {
+                        let ep = DirectEndpoint(host: h, port: endpoint.port)
+                        if !currentEndpoints.contains(ep) {
+                            currentEndpoints.append(ep)
+                        }
+                    }
+                    hostTarget?.endpoints = currentEndpoints
+                    persistHostTarget()
+                }
+            }
             persistPeers(); publishPeers()
             // Deduplicate: if a different connection already carries this peer,
             // close the older one so we don't fan out messages twice.
@@ -786,44 +905,58 @@ final class DirectTransport {
                 }
             }
             if firstHello {
-                sendEncrypted(["type": "hello", "deviceID": localID, "name": localName, "platform": "macOS"], only: connection)
+                sendEncrypted([
+                    "type": "hello",
+                    "deviceID": localID,
+                    "name": localName,
+                    "platform": "macOS",
+                    "hosts": Self.localAddresses()
+                ], only: connection)
                 sendRoster(only: nil)
             }
         case "clipboard":
             guard let text = message["text"] as? String, text.utf8.count <= Self.maximumTextBytes else { throw DirectCryptoError.malformed }
-            if let target = message["targetDeviceId"] as? String, !target.isEmpty, target != localID {
-                return
+            let msgID = message["id"] as? String ?? UUID().uuidString
+            if recentMessageIDs.contains(msgID) { return }
+            recentMessageIDs.append(msgID)
+            if recentMessageIDs.count > 256 { recentMessageIDs.removeFirst() }
+            let target = message["targetDeviceId"] as? String
+            if target == nil || target == localID {
+                log("Received clipboard text")
+                onClipboard?(text)
             }
-            if let msgID = message["id"] as? String {
-                if recentMessageIDs.contains(msgID) { return }
-                recentMessageIDs.append(msgID)
-                if recentMessageIDs.count > 64 { recentMessageIDs.removeFirst() }
-            }
-            log("Received clipboard text")
-            onClipboard?(text)
+            // Fan-out relay to other connected peers
+            relayEncrypted(message, except: connection, targetDeviceId: target)
         case "openUrl":
             guard let urlString = message["url"] as? String, urlString.utf8.count <= Self.maximumTextBytes,
                   let url = URL(string: urlString), let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https" else { throw DirectCryptoError.malformed }
-            if let target = message["targetDeviceId"] as? String, !target.isEmpty, target != localID {
-                return
+            let msgID = message["id"] as? String ?? UUID().uuidString
+            if recentMessageIDs.contains(msgID) { return }
+            recentMessageIDs.append(msgID)
+            if recentMessageIDs.count > 256 { recentMessageIDs.removeFirst() }
+            let target = message["targetDeviceId"] as? String
+            if target == nil || target == localID {
+                log("Received URL to open")
+                onOpenURL?(url)
             }
-            if let msgID = message["id"] as? String {
-                if recentMessageIDs.contains(msgID) { return }
-                recentMessageIDs.append(msgID)
-                if recentMessageIDs.count > 64 { recentMessageIDs.removeFirst() }
-            }
-            log("Received URL to open")
-            onOpenURL?(url)
+            // Fan-out relay to other connected peers
+            relayEncrypted(message, except: connection, targetDeviceId: target)
         case "ping":
             sendEncrypted(["type": "pong"], only: connection)
         case "pong":
             break
-        case "mediaOffer": try handleMediaOffer(message, connection: connection, context: context)
-        case "mediaAccept": try handleMediaAccept(message, connection: connection, context: context)
-        case "mediaChunk": try handleMediaChunk(message, connection: connection, context: context)
-        case "mediaAck": try handleMediaAck(message, connection: connection, context: context)
-        case "mediaComplete": try handleMediaComplete(message, connection: connection, context: context)
+        case "mediaOffer":
+            try handleMediaOffer(message, connection: connection, context: context)
+            relayEncrypted(message, except: connection, targetDeviceId: nil)
+        case "mediaAccept":
+            try handleMediaAccept(message, connection: connection, context: context)
+        case "mediaChunk":
+            try handleMediaChunk(message, connection: connection, context: context)
+        case "mediaAck":
+            try handleMediaAck(message, connection: connection, context: context)
+        case "mediaComplete":
+            try handleMediaComplete(message, connection: connection, context: context)
         case "mediaReject":
             context.outboundTimeout?.cancel(); context.outboundTimeout = nil; context.outboundImage = nil
             transferStatus("Image rejected by peer")
@@ -835,24 +968,40 @@ final class DirectTransport {
             if target == localID {
                 leaveChain()
             } else {
-                removeFromChain(target, requestedBy: connection)
+                peers.removeValue(forKey: target)
+                persistPeers()
+                publishPeers()
+                for candidate in connections.values {
+                    if contexts[ObjectIdentifier(candidate)]?.peerID == target {
+                        close(candidate)
+                    }
+                }
+                relayEncrypted(message, except: connection, targetDeviceId: nil)
             }
         case "roster":
             guard let members = message["members"] as? [[String: Any]] else { throw DirectCryptoError.malformed }
-            var updated: [String: Peer] = [:]
             for member in members {
                 guard let mid = member["id"] as? String, mid != localID else { continue }
                 let existing = peers[mid]
+                let isConn = (member["connected"] as? Bool) ?? (existing?.connected ?? false)
+                let hostStr = member["host"] as? String ?? existing?.endpoint.host ?? "unknown"
+                let portVal = (member["port"] as? Int).map { UInt16($0) } ?? existing?.endpoint.port ?? Self.port
                 let peer = Peer(
                     id: mid,
                     name: member["name"] as? String ?? existing?.name ?? "Device",
-                    endpoint: DirectEndpoint(host: member["host"] as? String ?? existing?.endpoint.host ?? "unknown", port: (member["port"] as? Int).map { UInt16($0) } ?? existing?.endpoint.port ?? Self.port),
-                    connected: (member["connected"] as? Bool) ?? false,
+                    endpoint: DirectEndpoint(host: hostStr, port: portVal),
+                    connected: isConn,
                     platform: member["platform"] as? String ?? existing?.platform ?? "Android"
                 )
-                updated[mid] = peer
+                peers[mid] = peer
+                if hostTarget?.id == mid && !hostStr.isEmpty && hostStr != "unknown" {
+                    let ep = DirectEndpoint(host: hostStr, port: portVal)
+                    if !(hostTarget?.endpoints.contains(ep) ?? false) {
+                        hostTarget?.endpoints.append(ep)
+                        persistHostTarget()
+                    }
+                }
             }
-            peers = updated
             persistPeers()
             publishPeers()
         case "rename":
@@ -869,6 +1018,7 @@ final class DirectTransport {
                 persistPeers()
                 publishPeers()
             }
+            relayEncrypted(message, except: connection, targetDeviceId: nil)
             sendRoster(only: nil)
         case "inviteRequest":
             guard context.peerID != nil, let invite = createInviteLocked() else { throw DirectCryptoError.authentication }
@@ -1031,13 +1181,14 @@ final class DirectTransport {
         queue.async { [weak self] in
             guard let self else { return }; let id = ObjectIdentifier(connection)
             self.contexts[id]?.outboundTimeout?.cancel()
-            // A peer whose connection ended is gone from this chain (it left,
-            // was killed, or lost the route). Remove it from the roster instead
-            // of leaving a stale "(reconnecting)" entry. Deliberate removals
-            // (rosterRemove/leaveChain/stop) already cleared the peer, so this
-            // is a no-op there.
             if let peerID = self.contexts[id]?.peerID {
-                self.removePeerFromRoster(peerID)
+                // Connection ended: mark peer disconnected without evicting from roster.
+                if var peer = self.peers[peerID] {
+                    peer.connected = false
+                    self.peers[peerID] = peer
+                    self.persistPeers()
+                    self.publishPeers()
+                }
                 // If this was the host we joined, reconnect automatically.
                 if peerID == self.hostTarget?.id {
                     self.queue.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -1088,6 +1239,22 @@ final class DirectTransport {
         DispatchQueue.main.async { self.onTransferStatus?(message) }
     }
 
+    private static func isPrivate172(_ host: String) -> Bool {
+        let parts = host.split(separator: ".")
+        guard parts.count == 4, let second = Int(parts[1]) else { return false }
+        return second >= 16 && second <= 31
+    }
+
+    static func endpointPriority(_ address: String) -> Int {
+        if address.hasPrefix("192.168.") || address.hasPrefix("10.") || (address.hasPrefix("172.") && isPrivate172(address)) {
+            return 0 // LAN first
+        } else if address.hasPrefix("100.") {
+            return 1 // common mesh/VPN range
+        } else {
+            return 2 // fallback
+        }
+    }
+
     private static func localAddresses() -> [String] {
         var result: [String] = []; var pointer: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
@@ -1099,12 +1266,7 @@ final class DirectTransport {
             }
         }
         return Array(Set(result)).sorted {
-            func priority(_ address: String) -> Int {
-                if address.hasPrefix("100.") { return 0 } // common mesh/VPN range
-                if address.hasPrefix("10.") || address.hasPrefix("172.") || address.hasPrefix("192.168.") { return 1 }
-                return 2
-            }
-            let left = priority($0), right = priority($1)
+            let left = endpointPriority($0), right = endpointPriority($1)
             return left == right ? $0 < $1 : left < right
         }
     }

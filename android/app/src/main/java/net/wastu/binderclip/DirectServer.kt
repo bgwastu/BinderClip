@@ -82,6 +82,7 @@ class DirectServer(
     private val memberNames = Collections.synchronizedMap(LinkedHashMap<String, String>())
     private val states = Collections.synchronizedMap(LinkedHashMap<Socket, MemberState>())
     private val kickedMembers = Collections.synchronizedSet(java.util.HashSet<String>())
+    private val recentMessageIds = Collections.synchronizedList(java.util.LinkedList<String>())
 
     private class IncomingImage(val id: String, val mimeType: String, val bytes: Int, val sha256: String) {
         val data = java.io.ByteArrayOutputStream(bytes)
@@ -317,6 +318,22 @@ class DirectServer(
         }
     }
 
+    private fun relay(senderSocket: Socket, json: JSONObject, targetDeviceId: String? = null) {
+        val key = store.groupKey ?: return
+        synchronized(writeLock) {
+            val targets = synchronized(memberSockets) {
+                memberSockets.entries.filter { (id, sock) ->
+                    sock !== senderSocket && (targetDeviceId.isNullOrBlank() || targetDeviceId == id)
+                }
+            }
+            if (targets.isEmpty()) return
+            val sealed = DirectProtocol.seal(json, key)
+            targets.forEach { (_, sock) ->
+                runCatching { DataOutputStream(sock.getOutputStream()) }.getOrNull()?.let { out -> write(out, sealed) }
+            }
+        }
+    }
+
     private fun acceptLoop() {
         while (running.get()) {
             val socket = runCatching { serverSocket?.accept() }.getOrNull() ?: continue
@@ -402,11 +419,12 @@ class DirectServer(
         onRosterChanged(store.members)
         broadcastRoster()
         onStatus("Connected to ${store.members.size} device${if (store.members.size == 1) "" else "s"}")
-        // Respond with our identity so the reconnecting member can confirm the host.
+        // Respond with our identity and all local IPs so the reconnecting member can reach any interface.
         val identity = JSONObject().put("type", "hello")
             .put("deviceID", store.deviceId)
             .put("name", deviceNameProvider())
             .put("platform", "Android")
+            .put("hosts", JSONArray(localIPv4Addresses()))
         if (pairKey != null) DirectProtocol.write(output, DirectProtocol.seal(identity, pairKey))
         else write(output, DirectProtocol.seal(identity, key))
     }
@@ -445,15 +463,27 @@ class DirectServer(
                 }
 
                 "clipboard" -> {
+                    val msgId = message.optString("id").ifBlank { UUID.randomUUID().toString() }
+                    if (recentMessageIds.contains(msgId)) continue
+                    recentMessageIds.add(msgId)
+                    if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
                     val target = message.optString("targetDeviceId")
-                    if (target.isNotBlank() && target != store.deviceId) continue
-                    message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
+                    if (target.isBlank() || target == store.deviceId) {
+                        message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
+                    }
+                    relay(socket, message, target.takeIf { it.isNotBlank() })
                 }
 
                 "openUrl" -> {
+                    val msgId = message.optString("id").ifBlank { UUID.randomUUID().toString() }
+                    if (recentMessageIds.contains(msgId)) continue
+                    recentMessageIds.add(msgId)
+                    if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
                     val target = message.optString("targetDeviceId")
-                    if (target.isNotBlank() && target != store.deviceId) continue
-                    message.optString("url").takeIf { it.isNotEmpty() }?.let(onOpenUrl)
+                    if (target.isBlank() || target == store.deviceId) {
+                        message.optString("url").takeIf { it.isNotEmpty() }?.let(onOpenUrl)
+                    }
+                    relay(socket, message, target.takeIf { it.isNotBlank() })
                 }
 
                 "ping" -> {
@@ -473,6 +503,7 @@ class DirectServer(
                         onRosterChanged(store.members)
                         broadcastRoster()
                     }
+                    relay(socket, message)
                 }
 
                 "rosterRemove" -> {
@@ -482,7 +513,10 @@ class DirectServer(
 
                 "inviteRequest" -> createInvite()
 
-                "mediaOffer" -> handleInboundOffer(message, key, socket)
+                "mediaOffer" -> {
+                    handleInboundOffer(message, key, socket)
+                    relay(socket, message)
+                }
                 "mediaAccept" -> handleOutboundAccept(message, key, socket)
                 "mediaChunk" -> handleInboundChunk(message, key, socket)
                 "mediaAck" -> handleOutboundAck(message, key, socket)
@@ -628,16 +662,15 @@ class DirectServer(
 
     private fun cleanup(socket: Socket) {
         states.remove(socket)
-        val removedIds = synchronized(memberSockets) {
+        val disconnectedIds = synchronized(memberSockets) {
             val ids = memberSockets.filterValues { it === socket }.keys.toList()
             ids.forEach { id ->
                 memberSockets.remove(id)
-                memberNames.remove(id)
-                store.removeMember(id)
+                store.updateMemberConnectionState(id, false)
             }
             ids
         }
-        if (removedIds.isNotEmpty()) {
+        if (disconnectedIds.isNotEmpty()) {
             onRosterChanged(store.members)
             broadcastRoster()
         }
@@ -665,15 +698,16 @@ class DirectServer(
                 .put("platform", "Android")
                 .put("connected", true)
         )
-        synchronized(memberSockets) { memberSockets.entries.toList() }.forEach { (id, _) ->
+        store.members.filter { it.deviceId != store.deviceId }.forEach { member ->
+            val isConnected = synchronized(memberSockets) { memberSockets.containsKey(member.deviceId) }
             put(
                 JSONObject()
-                    .put("id", id)
-                    .put("name", memberNames[id] ?: "Device")
-                    .put("host", runCatching { memberSockets[id]?.inetAddress?.hostAddress ?: "" }.getOrDefault(""))
-                    .put("port", portForSpace())
-                    .put("platform", "Android")
-                    .put("connected", true)
+                    .put("id", member.deviceId)
+                    .put("name", member.name)
+                    .put("host", member.host)
+                    .put("port", member.port)
+                    .put("platform", member.platform)
+                    .put("connected", isConnected)
             )
         }
     }

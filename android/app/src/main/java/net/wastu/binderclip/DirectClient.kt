@@ -3,7 +3,9 @@ package net.wastu.binderclip
 import android.util.Log
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.util.Base64
 import java.util.concurrent.Executors
@@ -65,13 +67,14 @@ class DirectClient(
         require(hosts.isNotEmpty()) { "Pairing code has no host" }
         val port = parsed.getQueryParameter("port")?.toIntOrNull() ?: error("Pairing code has no port")
         val id = parsed.getQueryParameter("id") ?: error("Pairing code has no id")
+        val sortedHosts = hosts.sortedBy { endpointPriority(it) }
         val inviteKey =
             Base64.getUrlDecoder().decode(parsed.getQueryParameter("key") ?: error("Pairing code has no key"))
         close(); onStatus("Pairing with Mac…")
         var failure: Exception? = null
-        for (host in hosts) {
+        for (host in sortedHosts) {
             try {
-                pair(host, port, id, inviteKey, hosts)
+                pair(host, port, id, inviteKey, sortedHosts)
                 return
             } catch (error: Exception) {
                 Log.w("BinderClip", "Direct route $host failed", error)
@@ -131,6 +134,20 @@ class DirectClient(
         attach(newSocket, input, newOutput, groupKey); sendHello(); onStatus("Paired and connected")
     }
 
+    private fun isPrivate172(host: String): Boolean {
+        val parts = host.split(".")
+        if (parts.size != 4) return false
+        val second = parts[1].toIntOrNull() ?: return false
+        return second in 16..31
+    }
+
+    private fun endpointPriority(host: String): Int = when {
+        host.startsWith("192.168.") || host.startsWith("10.") ||
+        (host.startsWith("172.") && isPrivate172(host)) -> 0 // LAN first
+        host.startsWith("100.") -> 1 // Mesh / CGNAT second
+        else -> 2 // Other fallback
+    }
+
     fun reconnect() {
         val primaryPeer = store.peer ?: store.members.firstOrNull { it.platform == "macOS" } ?: return
         val key = store.groupKey ?: return
@@ -144,21 +161,31 @@ class DirectClient(
             store.members.filter { it.platform == "macOS" }.forEach { add(it.host) }
         }.distinct().filter { it.isNotBlank() }
 
-        if (candidateHosts.isEmpty()) {
+        val sortedCandidateHosts = candidateHosts.sortedBy { endpointPriority(it) }
+
+        if (sortedCandidateHosts.isEmpty()) {
             onStatus("Waiting for ${primaryPeer.name}")
             onDisconnected()
             return
         }
 
-        // Happy Eyeballs parallel connection racing
+        // Happy Eyeballs parallel connection racing with LAN-first priority
         val winner = java.util.concurrent.atomic.AtomicReference<Pair<Socket, String>?>(null)
-        val latch = java.util.concurrent.CountDownLatch(candidateHosts.size)
-        val racePool = Executors.newFixedThreadPool(candidateHosts.size.coerceAtMost(4))
+        val latch = java.util.concurrent.CountDownLatch(sortedCandidateHosts.size)
+        val racePool = Executors.newFixedThreadPool(sortedCandidateHosts.size.coerceAtMost(4))
 
-        for (host in candidateHosts) {
+        for (host in sortedCandidateHosts) {
+            val priority = endpointPriority(host)
+            val staggerMs = when (priority) {
+                0 -> 0L
+                1 -> 150L
+                else -> 300L
+            }
             racePool.execute {
                 var candidateSocket: Socket? = null
                 try {
+                    if (staggerMs > 0) Thread.sleep(staggerMs)
+                    if (winner.get() != null) return@execute
                     val sock = Socket().apply {
                         tcpNoDelay = true
                         keepAlive = true
@@ -188,9 +215,13 @@ class DirectClient(
         val won = winner.get()
         if (won != null) {
             val (sock, activeHost) = won
-            if (activeHost != primaryPeer.host) {
-                store.peer = primaryPeer.copy(host = activeHost)
+            store.peer = primaryPeer.copy(host = activeHost, connected = true)
+            store.members = store.members.map { member ->
+                if (member.deviceId == primaryPeer.deviceId) {
+                    member.copy(host = activeHost, connected = true)
+                } else member
             }
+            onRosterChanged(store.members)
             attach(sock, DataInputStream(sock.getInputStream()), DataOutputStream(sock.getOutputStream()), key)
             sendHello()
             onStatus("Connected")
@@ -213,7 +244,7 @@ class DirectClient(
         }
         val msgId = java.util.UUID.randomUUID().toString()
         recentMessageIds.add(msgId)
-        if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+        if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
         val json = JSONObject().put("type", "clipboard").put("id", msgId).put("origin", store.deviceId)
             .put("timestamp", System.currentTimeMillis()).put("text", text)
         if (!targetDeviceId.isNullOrBlank()) json.put("targetDeviceId", targetDeviceId)
@@ -233,7 +264,7 @@ class DirectClient(
         }
         val msgId = java.util.UUID.randomUUID().toString()
         recentMessageIds.add(msgId)
-        if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+        if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
         val json = JSONObject().put("type", "openUrl").put("id", msgId).put("origin", store.deviceId)
             .put("timestamp", System.currentTimeMillis()).put("url", url)
         if (!targetDeviceId.isNullOrBlank()) json.put("targetDeviceId", targetDeviceId)
@@ -358,7 +389,7 @@ class DirectClient(
                             if (msgId.isNotBlank()) {
                                 if (recentMessageIds.contains(msgId)) continue
                                 recentMessageIds.add(msgId)
-                                if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+                                if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
                             }
                             message.optString("text").takeIf { it.isNotEmpty() }?.let(onText)
                         }
@@ -370,7 +401,7 @@ class DirectClient(
                             if (msgId.isNotBlank()) {
                                 if (recentMessageIds.contains(msgId)) continue
                                 recentMessageIds.add(msgId)
-                                if (recentMessageIds.size > 64) recentMessageIds.removeAt(0)
+                                if (recentMessageIds.size > 256) recentMessageIds.removeAt(0)
                             }
                             message.optString("url").takeIf { it.isNotEmpty() }?.let(onOpenUrl)
                         }
@@ -383,10 +414,32 @@ class DirectClient(
                             // Activity timestamp refreshed
                         }
 
-                        "hello" -> onPeerIdentity(message.optString("deviceID"), message.optString("name", "Mac"))
+                        "hello" -> {
+                            val hostId = message.optString("deviceID")
+                            val hostName = message.optString("name", "Mac")
+                            onPeerIdentity(hostId, hostName)
+                            val hostsArray = message.optJSONArray("hosts")
+                            if (hostsArray != null) {
+                                val newCandidates = mutableListOf<String>()
+                                for (i in 0 until hostsArray.length()) {
+                                    val h = hostsArray.optString(i)
+                                    if (h.isNotBlank()) newCandidates.add(h)
+                                }
+                                if (newCandidates.isNotEmpty()) {
+                                    store.peerCandidates = (store.peerCandidates + newCandidates).distinct()
+                                }
+                            }
+                        }
                         "roster" -> {
                             val members = decodeMembers(message.optJSONArray("members") ?: JSONArray())
-                            store.members = members
+                            val activeHostIp = store.peer?.host
+                            store.members = members.map { remote ->
+                                if (remote.deviceId == store.peer?.deviceId && !activeHostIp.isNullOrBlank()) {
+                                    remote.copy(host = activeHostIp, connected = true)
+                                } else {
+                                    remote
+                                }
+                            }
                             store.peer?.let { current ->
                                 members.firstOrNull { it.deviceId == current.deviceId }?.let { remote ->
                                     // Keep the host that actually connected (a
@@ -483,7 +536,12 @@ class DirectClient(
         write(
             out,
             DirectProtocol.seal(
-                JSONObject().put("type", "hello").put("deviceID", store.deviceId).put("name", deviceNameProvider()), key
+                JSONObject()
+                    .put("type", "hello")
+                    .put("deviceID", store.deviceId)
+                    .put("name", deviceNameProvider())
+                    .put("hosts", JSONArray(localIPv4Addresses())),
+                key
             )
         )
     }
@@ -618,4 +676,19 @@ class DirectClient(
         onTransferStatus(message)
         onFailure(message)
     }
+
+    private fun localIPv4Addresses(): List<String> = runCatching {
+        val result = mutableListOf<String>()
+        NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { networkInterface ->
+            if (networkInterface.isUp && !networkInterface.isLoopback) {
+                networkInterface.inetAddresses.toList().forEach { address ->
+                    if (address is Inet4Address && !address.isLoopbackAddress && !address.isLinkLocalAddress) {
+                        val ip = address.hostAddress ?: ""
+                        if (ip.isNotBlank() && !ip.startsWith("127.")) result.add(ip)
+                    }
+                }
+            }
+        }
+        result
+    }.getOrDefault(emptyList())
 }

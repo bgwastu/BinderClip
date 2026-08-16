@@ -40,7 +40,7 @@ object ImageClipboard {
     fun read(context: Context, clipboard: ClipboardManager): ImagePayload? = runCatching {
         val clip = clipboard.primaryClip ?: return null
         val mime = clip.description.filterMimeTypes("image/*")
-            .firstOrNull { it in ImagePayload.ALLOWED_MIME_TYPES } ?: return null
+            ?.firstOrNull { it in ImagePayload.ALLOWED_MIME_TYPES } ?: return null
         val uri = clip.getItemAt(0).uri ?: return null
         val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
             input.readBounded(ImagePayload.MAXIMUM_BYTES)

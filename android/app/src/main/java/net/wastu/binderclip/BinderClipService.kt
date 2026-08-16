@@ -647,15 +647,15 @@ class BinderClipService : Service() {
     }
 
     private fun sendTextIfFresh(text: String) {
+        if (text.isBlank() || text == suppressClipboard) return
+        val now = System.currentTimeMillis()
+        if (text == lastSentText && now - lastSendAt < 1_500) return
         if (store.hosting) {
             if (!server.isRunning) return
             server.broadcastText(text)
             return
         }
         if (!client.isConnected()) return
-        if (text.isBlank() || text == suppressClipboard) return
-        val now = System.currentTimeMillis()
-        if (text == lastSentText && now - lastSendAt < 1_500) return
         lastSentText = text; lastSendAt = now; client.sendText(text)
     }
 

@@ -338,34 +338,81 @@ class DirectServer(
 
     private fun handleMember(socket: Socket, input: DataInputStream, output: DataOutputStream) {
         try {
-            val invite = DirectProtocol.read(input)
-            if (invite.optString("type") != "invite") return
-            val rawId = invite.optString("id")
-            val entry = invites.remove(rawId) ?: return
-            if (entry.second < System.currentTimeMillis()) return
-            val nonce = invite.optString("nonce")
-            val expected = DirectProtocol.hmac(entry.first, "client|$rawId|$nonce")
-            if (!DirectProtocol.constantTimeEquals(expected, invite.optString("proof"))) return
-            val serverNonce = DeviceStore.nonce()
-            val serverProof = DirectProtocol.hmac(entry.first, "server|$rawId|$nonce|$serverNonce")
-            val pairKey = DirectProtocol.pairSessionKey(entry.first, nonce, serverNonce)
-            DirectProtocol.write(
-                output,
-                JSONObject().put("type", "inviteAccepted").put("nonce", serverNonce).put("proof", serverProof)
-            )
-            val key = store.groupKey ?: run { socket.close(); return }
-            val welcome = JSONObject()
-                .put("type", "welcome")
-                .put("groupKey", Base64.getEncoder().encodeToString(key))
-                .put("deviceID", store.deviceId)
-                .put("name", deviceNameProvider())
-                .put("members", rosterPayload())
-            DirectProtocol.write(output, DirectProtocol.seal(welcome, pairKey))
-            readLoop(socket, input, output, key)
+            val key = store.groupKey
+            val first = DirectProtocol.read(input)
+            when {
+                first.optString("type") == "invite" -> {
+                    val rawId = first.optString("id")
+                    val entry = invites.remove(rawId) ?: return
+                    if (entry.second < System.currentTimeMillis()) return
+                    val nonce = first.optString("nonce")
+                    val expected = DirectProtocol.hmac(entry.first, "client|$rawId|$nonce")
+                    if (!DirectProtocol.constantTimeEquals(expected, first.optString("proof"))) return
+                    val serverNonce = DeviceStore.nonce()
+                    val serverProof = DirectProtocol.hmac(entry.first, "server|$rawId|$nonce|$serverNonce")
+                    val pairKey = DirectProtocol.pairSessionKey(entry.first, nonce, serverNonce)
+                    DirectProtocol.write(
+                        output,
+                        JSONObject().put("type", "inviteAccepted").put("nonce", serverNonce).put("proof", serverProof)
+                    )
+                    if (key == null) { socket.close(); return }
+                    val welcome = JSONObject()
+                        .put("type", "welcome")
+                        .put("groupKey", Base64.getEncoder().encodeToString(key))
+                        .put("deviceID", store.deviceId)
+                        .put("name", deviceNameProvider())
+                        .put("members", rosterPayload())
+                    DirectProtocol.write(output, DirectProtocol.seal(welcome, pairKey))
+                    readLoop(socket, input, output, key)
+                }
+
+                // A returning member reconnecting without a fresh invite (the
+                // connection dropped after a network/VPN change). It proves
+                // membership by encrypting its hello with the group key.
+                key != null && first.optString("type") == "encrypted" -> {
+                    val hello = runCatching { DirectProtocol.open(first, key) }.getOrNull() ?: return
+                    if (hello.optString("type") != "hello") return
+                    acceptReturningMember(socket, output, key, hello, pairKey = null)
+                    readLoop(socket, input, output, key)
+                }
+
+                else -> return
+            }
         } catch (error: Exception) {
             Log.w("BinderClip", "Host handshake failed", error)
         } finally {
             cleanup(socket)
+        }
+    }
+
+    private fun acceptReturningMember(socket: Socket, output: DataOutputStream, key: ByteArray, hello: JSONObject, pairKey: ByteArray?) {
+        val id = hello.optString("deviceID")
+        if (id.isBlank()) return
+        replaceMemberSocket(id, socket)
+        memberSockets[id] = socket
+        memberNames[id] = hello.optString("name", "Device")
+        val host = runCatching { socket.inetAddress?.hostAddress ?: "" }.getOrDefault("")
+        val platform = hello.optString("platform", "Android")
+        store.upsertMembers(listOf(RememberedPeer(hello.optString("name", "Device"), host, portForSpace(), id, platform, true)))
+        onRosterChanged(store.members)
+        broadcastRoster()
+        onStatus("Connected to ${store.members.size} device${if (store.members.size == 1) "" else "s"}")
+        // Respond with our identity so the reconnecting member can confirm the host.
+        val identity = JSONObject().put("type", "hello")
+            .put("deviceID", store.deviceId)
+            .put("name", deviceNameProvider())
+            .put("platform", "Android")
+        if (pairKey != null) DirectProtocol.write(output, DirectProtocol.seal(identity, pairKey))
+        else write(output, DirectProtocol.seal(identity, key))
+    }
+
+    /** When a member reconnects, drop any previous connection from the same
+     *  device so duplicate sockets don't linger and echo messages twice. */
+    private fun replaceMemberSocket(id: String, newSocket: Socket) {
+        val previous = synchronized(memberSockets) { memberSockets[id] }
+        if (previous != null && previous !== newSocket) {
+            runCatching { previous.close() }
+            states.remove(previous)
         }
     }
 
@@ -379,6 +426,7 @@ class DirectServer(
                     val name = message.optString("name", "Device")
                     val platform = message.optString("platform", "Android")
                     if (id.isNotBlank()) {
+                        replaceMemberSocket(id, socket)
                         memberSockets[id] = socket
                         memberNames[id] = name
                         val host = runCatching { socket.inetAddress?.hostAddress ?: "" }.getOrDefault("")

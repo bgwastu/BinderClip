@@ -28,6 +28,20 @@ struct Peer: Codable, Hashable, Identifiable {
     }
 }
 
+/// Durable record of the chain host this Mac joined, so it can reconnect
+/// automatically when the connection drops (network change, host restart,
+/// VPN toggle) without needing a fresh QR invite.
+struct HostTarget: Codable {
+    let id: String
+    var name: String
+    var endpoints: [DirectEndpoint]
+
+    enum CodingKeys: String, CodingKey { case id, name, endpoints }
+    init(id: String, name: String, endpoints: [DirectEndpoint]) {
+        self.id = id; self.name = name; self.endpoints = endpoints
+    }
+}
+
 /// Single-purpose direct TCP listener. Every post-pairing payload is AES-GCM
 /// encrypted with a group key received only through a one-time QR invitation.
 final class DirectTransport {
@@ -76,6 +90,9 @@ final class DirectTransport {
     private var pathMonitor: NWPathMonitor?
     private var heartbeatTimer: DispatchSourceTimer?
     private var rosterRefreshTimer: DispatchSourceTimer?
+    private var reconnectTimer: DispatchSourceTimer?
+    private var reconnectAttempt = 0
+    private var hostTarget: HostTarget?
     private var recentMessageIDs: [String] = []
     private var contexts: [ObjectIdentifier: Context] = [:]
     private var connections: [ObjectIdentifier: NWConnection] = [:]
@@ -97,6 +114,7 @@ final class DirectTransport {
         if let existing = secureStore.data(account: "group-key") { groupKey = existing }
         else { let generated = DirectCrypto.randomBytes(count: 32); secureStore.set(generated, account: "group-key"); groupKey = generated }
         loadPeers()
+        loadHostTarget()
     }
 
     func setLocalDeviceName(_ name: String) {
@@ -138,6 +156,117 @@ final class DirectTransport {
         queue.async { [weak self] in
             guard let self, self.listener == nil else { return }
             self.startListener(includeBonjour: true)
+            self.startReconnectMonitoring()
+            // If we previously joined a chain, reconnect to it on launch.
+            if self.hostTarget != nil {
+                self.tryReconnect()
+            }
+        }
+    }
+
+    /// Periodically re-attempt the connection to the remembered host so a drop
+    /// (mesh VPN toggle, network switch, host restart) heals itself.
+    private func startReconnectMonitoring() {
+        reconnectTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 8, repeating: 8)
+        timer.setEventHandler { [weak self] in
+            self?.tryReconnect()
+        }
+        timer.resume()
+        reconnectTimer = timer
+    }
+
+    private func isConnectedToHost() -> Bool {
+        guard let hostTarget else { return false }
+        return connections.values.contains { contexts[ObjectIdentifier($0)]?.peerID == hostTarget.id }
+    }
+
+    private func tryReconnect() {
+        guard let hostTarget else { return }
+        if isConnectedToHost() { reconnectAttempt = 0; return }
+        // Run the handshake off the transport queue so the semaphore-based
+        // connection setup doesn't block the queue that NWConnection uses.
+        let reconnectQueue = DispatchQueue(label: "net.wastu.binderclip.reconnect")
+        reconnectQueue.async { [weak self] in
+            self?.reconnect(to: hostTarget)
+        }
+    }
+
+    /// Reconnect as a returning member using the stored group key and the
+    /// host's candidate endpoints. No fresh invite is needed: membership is
+    /// proven by encrypting the hello with the group key.
+    private func reconnect(to target: HostTarget) {
+        guard !target.endpoints.isEmpty else { return }
+        let key = groupKey
+        var lastError: Error?
+        for endpoint in target.endpoints {
+            do {
+                try reconnectHost(endpoint: endpoint, key: key)
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        log("Reconnect to \(target.name) failed\(lastError.map { ": \($0.localizedDescription)" } ?? "")", level: .warning)
+        transferStatus("Reconnecting to \(target.name)…")
+    }
+
+    private func reconnectHost(endpoint: DirectEndpoint, key: Data) throws {
+        // Close any existing connection to avoid duplicates.
+        for connection in connections.values where contexts[ObjectIdentifier(connection)]?.peerID == hostTarget?.id {
+            close(connection)
+        }
+        let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: NWEndpoint.Port(rawValue: endpoint.port)!, using: .tcp)
+        let id = ObjectIdentifier(connection)
+        contexts[id] = Context(); connections[id] = connection
+        let semaphore = DispatchSemaphore(value: 0)
+        var connectError: Error?
+        // Wait for the connection to become ready (or fail).
+        var ready = false
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                ready = true
+                semaphore.signal()
+            } else if case .failed(let error) = state {
+                connectError = error
+                semaphore.signal()
+            } else if case .waiting(let error) = state {
+                connectError = error
+                semaphore.signal()
+            }
+        }
+        connection.start(queue: queue)
+        // Give the connection a few seconds to establish.
+        _ = semaphore.wait(timeout: .now() + 5)
+        guard ready else {
+            contexts.removeValue(forKey: id); connections.removeValue(forKey: id); connection.cancel()
+            throw connectError ?? DirectCryptoError.malformed
+        }
+        // Send an encrypted hello proving group-key membership.
+        let helloPayload = try DirectCrypto.seal(["type": "hello", "deviceID": localID, "name": localName, "platform": "macOS"], key: key)
+        let helloFrame = try FrameCodec.encode(try JSONSerialization.data(withJSONObject: helloPayload))
+        let sendSemaphore = DispatchSemaphore(value: 0)
+        var sendError: Error?
+        connection.send(content: helloFrame, completion: .contentProcessed { error in
+            if let error { sendError = error }
+            sendSemaphore.signal()
+        })
+        _ = sendSemaphore.wait(timeout: .now() + 5)
+        if let sendError { contexts.removeValue(forKey: id); connections.removeValue(forKey: id); connection.cancel(); throw sendError }
+        // The host replies with its own hello; mark ourselves connected.
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let hostTarget = self.hostTarget else { return }
+            self.contexts[id]?.peerID = hostTarget.id
+            self.contexts[id]?.receiveStarted = false
+            if self.contexts[id]?.receiveStarted == false {
+                self.contexts[id]?.receiveStarted = true
+                self.receive(connection)
+            }
+            self.reconnectAttempt = 0
+            self.transferStatus("Reconnected to \(hostTarget.name)")
+            self.log("Reconnected to \(hostTarget.name)")
         }
     }
 
@@ -255,6 +384,7 @@ final class DirectTransport {
         queue.async { [weak self] in
             self?.heartbeatTimer?.cancel(); self?.heartbeatTimer = nil
             self?.rosterRefreshTimer?.cancel(); self?.rosterRefreshTimer = nil
+            self?.reconnectTimer?.cancel(); self?.reconnectTimer = nil
             self?.pathMonitor?.cancel(); self?.pathMonitor = nil
             self?.connections.values.forEach { $0.cancel() }
             self?.connections.removeAll(); self?.contexts.removeAll(); self?.listener?.cancel(); self?.listener = nil
@@ -271,6 +401,7 @@ final class DirectTransport {
             self.secureStore.set(fresh, account: "group-key")
             self.peers.removeAll()
             self.invites.removeAll()
+            self.clearHostTarget()
             self.persistPeers()
             self.connections.values.forEach { self.close($0) }
             self.publishPeers()
@@ -287,6 +418,7 @@ final class DirectTransport {
             guard let self else { return }
             self.peers.removeAll()
             self.invites.removeAll()
+            self.clearHostTarget()
             self.persistPeers()
             self.connections.values.forEach { self.close($0) }
             self.publishPeers()
@@ -321,9 +453,11 @@ final class DirectTransport {
             return
         }
         var failure: Error?
+        // Remember every advertised host as a candidate for automatic reconnect.
+        let candidates = hosts.map { DirectEndpoint(host: $0, port: port) }
         for host in hosts {
             do {
-                try joinHost(host: host, port: port, inviteID: rawID, inviteKey: inviteKey)
+                try joinHost(host: host, port: port, inviteID: rawID, inviteKey: inviteKey, candidates: candidates)
                 return
             } catch {
                 failure = error
@@ -333,7 +467,7 @@ final class DirectTransport {
         log("Join chain failed: \(failure.map { "\($0.localizedDescription)" } ?? "unknown")", level: .warning)
     }
 
-    private func joinHost(host: String, port: UInt16, inviteID: String, inviteKey: Data) throws {
+    private func joinHost(host: String, port: UInt16, inviteID: String, inviteKey: Data, candidates: [DirectEndpoint] = []) throws {
         let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
         let id = ObjectIdentifier(connection)
         contexts[id] = Context(); connections[id] = connection
@@ -413,6 +547,12 @@ final class DirectTransport {
                 self.groupKey = remoteKey
                 self.secureStore.set(remoteKey, account: "group-key")
                 self.peers.removeAll()
+                // Record the host so we can reconnect automatically without a
+                // fresh invite if this connection ever drops.
+                let candidateEndpoints = (candidates.isEmpty ? [DirectEndpoint(host: host, port: port)] : candidates) + [DirectEndpoint(host: host, port: port)]
+                self.hostTarget = HostTarget(id: hostDeviceID, name: hostName, endpoints: Array(Set(candidateEndpoints)))
+                self.persistHostTarget()
+                self.reconnectAttempt = 0
                 var roster = [Peer(id: hostDeviceID, name: hostName, endpoint: DirectEndpoint(host: host, port: port), connected: true, platform: "Android")]
                 for member in membersArray {
                     guard let mid = member["id"] as? String, mid != self.localID, mid != hostDeviceID else { continue }
@@ -591,7 +731,9 @@ final class DirectTransport {
         switch message["type"] as? String {
         case "hello":
             guard let id = message["deviceID"] as? String, let name = message["name"] as? String,
-                  peers[id] != nil || context.pairKey != nil else { throw DirectCryptoError.authentication }
+                  id != localID, !id.isEmpty else { throw DirectCryptoError.authentication }
+            // Decryption with the group key already proves membership, so a
+            // returning member reconnecting without a fresh invite is accepted.
             let firstHello = context.peerID == nil
             context.peerID = id
             let endpoint: DirectEndpoint
@@ -603,6 +745,13 @@ final class DirectTransport {
             }
             peers[id] = Peer(id: id, name: name, endpoint: endpoint, connected: true, platform: message["platform"] as? String ?? "Android")
             persistPeers(); publishPeers()
+            // Deduplicate: if a different connection already carries this peer,
+            // close the older one so we don't fan out messages twice.
+            for (otherID, otherConnection) in connections where otherID != ObjectIdentifier(connection) {
+                if contexts[otherID]?.peerID == id {
+                    close(otherConnection)
+                }
+            }
             if firstHello {
                 sendEncrypted(["type": "hello", "deviceID": localID, "name": localName, "platform": "macOS"], only: connection)
                 sendRoster(only: nil)
@@ -856,6 +1005,12 @@ final class DirectTransport {
             // is a no-op there.
             if let peerID = self.contexts[id]?.peerID {
                 self.removePeerFromRoster(peerID)
+                // If this was the host we joined, reconnect automatically.
+                if peerID == self.hostTarget?.id {
+                    self.queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                        self?.tryReconnect()
+                    }
+                }
             }
             self.contexts.removeValue(forKey: id); self.connections.removeValue(forKey: id); connection.cancel()
         }
@@ -866,6 +1021,16 @@ final class DirectTransport {
         peers = Dictionary(uniqueKeysWithValues: saved.map { ($0.id, $0) })
     }
     private func persistPeers() { UserDefaults.standard.set(try? JSONEncoder().encode(Array(peers.values)), forKey: "peers") }
+
+    private func loadHostTarget() {
+        guard let data = UserDefaults.standard.data(forKey: "host-target"), let saved = try? JSONDecoder().decode(HostTarget.self, from: data) else { return }
+        hostTarget = saved
+    }
+    private func persistHostTarget() { UserDefaults.standard.set(try? JSONEncoder().encode(hostTarget), forKey: "host-target") }
+    private func clearHostTarget() {
+        hostTarget = nil
+        UserDefaults.standard.removeObject(forKey: "host-target")
+    }
     private func publishPeers() {
         let snapshot = peers.values.sorted { $0.name < $1.name }
         DispatchQueue.main.async { self.onPeersChanged?(snapshot) }

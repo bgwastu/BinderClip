@@ -355,7 +355,7 @@ private fun BinderClipScreen(
         addAll(state.members.filter { !it.deviceId.contains('@') })
         if (state.peer != null && none { it.deviceId == state.localDeviceId }) add(
             RememberedPeer(
-                DeviceNames.android(context),
+                state.localDeviceName.ifBlank { DeviceNames.android(context) },
                 localIpAddress(context),
                 39_421,
                 state.localDeviceId,
@@ -366,7 +366,7 @@ private fun BinderClipScreen(
     }.distinctBy { it.deviceId }
         .map { device ->
             if (device.deviceId == state.localDeviceId) device.copy(
-                name = DeviceNames.android(context),
+                name = state.localDeviceName.ifBlank { DeviceNames.android(context) },
                 host = localIpAddress(context),
                 platform = "Android"
             ) else device

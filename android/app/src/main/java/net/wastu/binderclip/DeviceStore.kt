@@ -143,6 +143,14 @@ class DeviceStore(context: Context) {
             if (it.deviceId == deviceId) it.copy(connected = isConnected) else it
         }
     }
+
+    fun applyRename(deviceId: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        if (deviceId == this.deviceId) customDeviceName = trimmed
+        peer = peer?.let { if (it.deviceId == deviceId) it.copy(name = trimmed) else it }
+        members = members.map { if (it.deviceId == deviceId) it.copy(name = trimmed) else it }
+    }
     fun removeMember(deviceId: String) { members = members.filterNot { it.deviceId == deviceId } }
 
     /** Reset pairing key: fresh PSK key, empty roster. */

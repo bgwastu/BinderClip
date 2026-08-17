@@ -74,7 +74,9 @@ public final class WebSocketServer: @unchecked Sendable {
         }
         queue.async { [weak self] in
             guard let self else { return }
-            _ = self.rosterManager.renamePeer(id: id, newName: newName)
+            guard self.rosterManager.renamePeer(id: id, newName: newName) else { return }
+            let name = self.rosterManager.peers[id]?.name ?? newName
+            self.broadcastText(["type": "rename", "id": id, "name": name])
             self.updateCachedState()
             self.publishPeers()
         }
@@ -447,9 +449,19 @@ public final class WebSocketServer: @unchecked Sendable {
         case "rename":
             guard session.isAuthenticated else { return }
             if let peerID = json["id"] as? String, let name = json["name"] as? String {
-                _ = rosterManager.renamePeer(id: peerID, newName: name)
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                if peerID == localDeviceID {
+                    _ = rosterManager.setLocalName(trimmed)
+                } else {
+                    _ = rosterManager.renamePeer(id: peerID, newName: trimmed)
+                }
                 updateCachedState()
                 publishPeers()
+                broadcastText(
+                    ["type": "rename", "id": peerID, "name": trimmed],
+                    excludeSessionId: ObjectIdentifier(session.connection)
+                )
             }
 
         case "ping":

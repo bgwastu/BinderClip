@@ -40,6 +40,7 @@ data class AppState(
     val automaticClipboardEnabled: Boolean = false,
     val accessibilityEnabled: Boolean = false,
     val localDeviceId: String = "",
+    val localDeviceName: String = "",
 )
 
 object AppRuntime {
@@ -280,9 +281,12 @@ class BinderClipService : Service() {
             }
 
             ACTION_UPDATE_DEVICE_NAME -> {
-                val newName = intent?.getStringExtra(EXTRA_DEVICE_NAME)
+                val id = intent?.getStringExtra(EXTRA_MEMBER_ID)
+                val newName = intent?.getStringExtra(EXTRA_DEVICE_NAME)?.trim()
                 executor.execute {
-                    store.customDeviceName = newName
+                    if (id.isNullOrBlank() || newName.isNullOrBlank()) return@execute
+                    store.applyRename(id, newName)
+                    client.sendRename(id, newName)
                     publishState()
                 }
             }
@@ -511,6 +515,7 @@ class BinderClipService : Service() {
             automaticClipboardEnabled = automaticClipboardEnabled,
             accessibilityEnabled = AccessibilityClipboardBridge.isEnabled(this),
             localDeviceId = store.deviceId,
+            localDeviceName = DeviceNames.android(this),
         )
     }
 

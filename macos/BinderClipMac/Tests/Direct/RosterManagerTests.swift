@@ -61,6 +61,16 @@ final class RosterManagerTests: XCTestCase {
         XCTAssertTrue(manager.peers.isEmpty)
     }
 
+    func testRenamePeerUpdatesStoredName() {
+        let manager = isolatedManager()
+        let peer = Peer(id: "phone-1", name: "Pixel", endpoint: DirectEndpoint(host: "192.168.1.8", port: 39421), connected: true, platform: "Android")
+        XCTAssertTrue(manager.addOrUpdatePeer(peer))
+        XCTAssertTrue(manager.renamePeer(id: "phone-1", newName: "Kitchen"))
+        XCTAssertEqual(manager.peers["phone-1"]?.name, "Kitchen")
+        XCTAssertFalse(manager.renamePeer(id: "phone-1", newName: "   "))
+        XCTAssertEqual(manager.peers["phone-1"]?.name, "Kitchen")
+    }
+
     func testRotateGroupKeyDoesNotTouchApplicationSupportSecrets() {
         let live = PrivateStateStore.applicationSupportDirectory().appendingPathComponent("direct-secrets.json")
         let before = try? Data(contentsOf: live)

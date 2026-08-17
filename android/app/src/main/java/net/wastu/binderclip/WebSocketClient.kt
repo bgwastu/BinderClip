@@ -325,13 +325,8 @@ class WebSocketClient(
                 val id = json.optString("id")
                 val name = json.optString("name")
                 if (id.isNotEmpty() && name.isNotEmpty()) {
-                    val current = store.peer
-                    if (current?.deviceId == id) {
-                        val updated = current.copy(name = name)
-                        store.peer = updated
-                        store.upsertMembers(listOf(updated))
-                        onRosterChanged(store.members)
-                    }
+                    store.applyRename(id, name)
+                    onRosterChanged(store.members)
                 }
             }
 
@@ -396,6 +391,16 @@ class WebSocketClient(
             put("text", text)
             put("hash", hash)
             put("timestamp", System.currentTimeMillis())
+        }
+        socket.send(payload.toString())
+    }
+
+    fun sendRename(deviceId: String, name: String) {
+        val socket = activeSocket ?: return
+        val payload = JSONObject().apply {
+            put("type", "rename")
+            put("id", deviceId)
+            put("name", name)
         }
         socket.send(payload.toString())
     }

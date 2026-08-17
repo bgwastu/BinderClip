@@ -6,6 +6,7 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     private var imageView: NSImageView?
     private var countdownLabel: NSTextField?
     private var statusLabel: NSTextField?
+    private var endpointsLabel: NSTextField?
     private var invitationProvider: (() -> URL?)?
     private var expiresAt = Date()
     private var timer: Timer?
@@ -26,7 +27,7 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     }
 
     func closeWithSuccess() {
-        statusLabel?.stringValue = "✓ Device connected!"
+        statusLabel?.stringValue = "Device connected!"
         statusLabel?.textColor = .systemGreen
         stopTimer()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
@@ -52,9 +53,17 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         countdown.textColor = .secondaryLabelColor
         countdown.alignment = .center
         countdownLabel = countdown
+        let endpoints = NSTextField(labelWithString: "")
+        endpoints.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        endpoints.textColor = .tertiaryLabelColor
+        endpoints.alignment = .center
+        endpoints.maximumNumberOfLines = 2
+        endpoints.lineBreakMode = .byWordWrapping
+        endpoints.preferredMaxLayoutWidth = 280
+        endpointsLabel = endpoints
 
         let image = NSImageView()
-        image.imageScaling = .scaleNone
+        image.imageScaling = .scaleProportionallyUpOrDown
         image.wantsLayer = true
         image.layer?.backgroundColor = NSColor.white.cgColor
         image.translatesAutoresizingMaskIntoConstraints = false
@@ -75,12 +84,12 @@ final class PairingWindow: NSObject, NSWindowDelegate {
             qrSurface.heightAnchor.constraint(equalToConstant: 300),
         ])
 
-        let stack = NSStackView(views: [title, detail, qrSurface, countdown])
+        let stack = NSStackView(views: [title, detail, qrSurface, endpoints, countdown])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 22, right: 24)
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 348, height: 440), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 348, height: 470), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "BinderClip"
         panel.level = .floating
         panel.contentView = stack
@@ -89,8 +98,18 @@ final class PairingWindow: NSObject, NSWindowDelegate {
     }
 
     private func refreshInvite() {
-        guard let url = invitationProvider?(), let image = qr(url.absoluteString) else { return }
+        guard let url = invitationProvider?() else {
+            statusLabel?.stringValue = "No local address. Join Wi-Fi or allow Local Network."
+            imageView?.image = nil
+            endpointsLabel?.stringValue = ""
+            return
+        }
+        guard let image = qr(url.absoluteString) else { return }
         imageView?.image = image
+        if let info = SyncProtocol.parsePairingURL(url.absoluteString) {
+            let hosts = info.endpoints.compactMap { SyncProtocol.parseEndpoint($0)?.host }
+            endpointsLabel?.stringValue = hosts.joined(separator: "  ·  ")
+        }
         expiresAt = Date().addingTimeInterval(300)
         #if DEBUG
         DiagnosticLog.shared.info("Pairing URL generated: \(url.absoluteString)")
@@ -119,13 +138,14 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
         filter.setValue(Data(content.utf8), forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
-        // Keep QR modules at an integer scale. The panel has enough white quiet
-        // zone around this size, while a larger image would be clipped or blurred.
-        guard let output = filter.outputImage?.transformed(by: .init(scaleX: 5, y: 5)) else { return nil }
-        let representation = NSCIImageRep(ciImage: output)
+        guard let output = filter.outputImage else { return nil }
+        let extent = output.extent
+        let target: CGFloat = 272
+        let scale = max(1, floor(min(target / extent.width, target / extent.height)))
+        let scaled = output.transformed(by: .init(scaleX: scale, y: scale))
+        let representation = NSCIImageRep(ciImage: scaled)
         let image = NSImage(size: representation.size)
         image.addRepresentation(representation)
         return image
     }
 }
-

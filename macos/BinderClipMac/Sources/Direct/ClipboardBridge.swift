@@ -59,7 +59,7 @@ final class ClipboardBridge {
     func sendCurrentClipboard() {
         switch ClipboardClassifier.read(from: pasteboard) {
         case .text(let text):
-            guard text.utf8.count <= DirectTransport.maximumTextBytes else { DiagnosticLog.shared.error("Clipboard text is too large"); return }
+            guard text.utf8.count <= SyncProtocol.maximumTextBytes else { DiagnosticLog.shared.error("Clipboard text is too large"); return }
             onLocalText?(text)
         case .image(let image): onLocalImage?(image)
         case .unsupported: DiagnosticLog.shared.warning("Clipboard content is unsupported or unavailable")
@@ -74,7 +74,7 @@ final class ClipboardBridge {
             if image.sha256 == lastInboundImageHash { lastInboundImageHash = nil; return }
             onLocalImage?(image)
         case .text(let text):
-            guard text.utf8.count <= DirectTransport.maximumTextBytes else { return }
+            guard text.utf8.count <= SyncProtocol.maximumTextBytes else { return }
             let digest = hash(text)
             if digest == lastInboundHash { lastInboundHash = nil; return }
             onLocalText?(text)

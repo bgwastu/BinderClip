@@ -1,6 +1,5 @@
 package net.wastu.binderclip
 
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -23,23 +22,5 @@ class ClipboardClassifierTest {
         val payload = ImagePayload(id = "test-123", mimeType = "image/png", data = data)
         assertEquals(64, payload.sha256.length)
         assertEquals("image/png", payload.mimeType)
-    }
-
-    @Test
-    fun directProtocolTextMessageRoundTrip() {
-        val key = ByteArray(32) { 42 }
-        val original = JSONObject()
-            .put("type", "clipboard")
-            .put("id", "msg-1")
-            .put("text", "https://example.com/test?param=value")
-            .put("timestamp", 1234567890L)
-
-        val sealed = DirectProtocol.seal(original, key)
-        val opened = DirectProtocol.open(sealed, key)
-
-        assertEquals("clipboard", opened.getString("type"))
-        assertEquals("msg-1", opened.getString("id"))
-        assertEquals("https://example.com/test?param=value", opened.getString("text"))
-        assertEquals(1234567890L, opened.getLong("timestamp"))
     }
 }

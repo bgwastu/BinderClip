@@ -3,17 +3,16 @@ import CryptoKit
 import Foundation
 import UniformTypeIdentifiers
 
-struct ImagePayload: Sendable {
-    static let maximumBytes = 30 * 1_024 * 1_024
-    // Allow room for JSON, AES-GCM, and base64 inside a framed encrypted message.
-    static let chunkBytes = 192 * 1_024
+public struct ImagePayload: Sendable {
+    public static let maximumBytes = 30 * 1_024 * 1_024
+    public static let allowedMIMETypes: Set<String> = ["image/png", "image/jpeg", "image/webp", "image/heic"]
 
-    let id: UUID
-    let mimeType: String
-    let data: Data
-    let sha256: String
+    public let id: UUID
+    public let mimeType: String
+    public let data: Data
+    public let sha256: String
 
-    init(id: UUID = UUID(), mimeType: String, data: Data) throws {
+    public init(id: UUID = UUID(), mimeType: String, data: Data) throws {
         guard Self.allowedMIMETypes.contains(mimeType), data.count > 0, data.count <= Self.maximumBytes else {
             throw ImageTransferError.invalidImage
         }
@@ -22,14 +21,12 @@ struct ImagePayload: Sendable {
         self.data = data
         sha256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
-
-    static let allowedMIMETypes: Set<String> = ["image/png", "image/jpeg", "image/webp", "image/heic"]
 }
 
-enum ImageTransferError: Error { case invalidImage, hashMismatch, protocolViolation }
+public enum ImageTransferError: Error { case invalidImage, hashMismatch, protocolViolation }
 
-enum ImageClipboard {
-    static func read(from pasteboard: NSPasteboard) -> ImagePayload? {
+public enum ImageClipboard {
+    public static func read(from pasteboard: NSPasteboard) -> ImagePayload? {
         let candidates: [(NSPasteboard.PasteboardType, String)] = [
             (.png, "image/png"),
             (NSPasteboard.PasteboardType("public.jpeg"), "image/jpeg"),
@@ -44,7 +41,7 @@ enum ImageClipboard {
         return payload
     }
 
-    static func write(_ payload: ImagePayload, to pasteboard: NSPasteboard) {
+    public static func write(_ payload: ImagePayload, to pasteboard: NSPasteboard) {
         let type: NSPasteboard.PasteboardType = switch payload.mimeType {
         case "image/png": .png
         case "image/jpeg": NSPasteboard.PasteboardType("public.jpeg")
@@ -54,7 +51,6 @@ enum ImageClipboard {
         }
         pasteboard.clearContents()
         pasteboard.setData(payload.data, forType: type)
-        // Also provide TIFF representation if convertible so all macOS apps can paste seamlessly
         if let image = NSImage(data: payload.data), let tiff = image.tiffRepresentation {
             pasteboard.setData(tiff, forType: .tiff)
         }

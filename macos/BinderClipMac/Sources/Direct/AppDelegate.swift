@@ -11,7 +11,7 @@ import UserNotifications
  FORM: native menu-bar utility; compact operating panel rather than a dashboard.
 */
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpdaterDelegate {
-    private let transport = DirectTransport()
+    private let transport = WebSocketServer()
     private let clipboard = ClipboardBridge()
     private let pairing = PairingWindow()
     private let logWindow = LogWindowController()
@@ -21,22 +21,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         updaterDelegate: self,
         userDriverDelegate: nil
     )
-    private var peerCountBeforePairing: Int?
+    private var peerIdsBeforePairing: Set<String>?
     private var peers: [Peer] = [] { didSet { scheduleStateRefresh() } }
     private var status = "Listening" { didSet { scheduleStateRefresh() } }
     private var localNetworkPermissionRequired = false { didSet { scheduleStateRefresh() } }
     private var automationPermissionRequired = false { didSet { scheduleStateRefresh() } }
     private var cachedActiveTab: (browser: String, url: URL)?
     private let statusMenu = NSMenu()
+    private var isStatusMenuOpen = false
+    private var menuNeedsRebuild = false
 
     private func scheduleStateRefresh() {
-        if Thread.isMainThread {
-            renderMenu(); updateStatusIcon(); checkPairingCompletion()
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.renderMenu(); self.updateStatusIcon(); self.checkPairingCompletion()
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.updateStatusIcon()
+            self.checkPairingCompletion()
+            if self.isStatusMenuOpen {
+                self.menuNeedsRebuild = true
+                return
             }
+            self.renderMenu()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
         }
     }
 
@@ -44,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         _ = updaterController
         statusMenu.delegate = self
         statusMenu.autoenablesItems = false
+        statusItem.isVisible = true
         statusItem.menu = statusMenu
         updateStatusIcon()
 
@@ -67,8 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         transport.onPeersChanged = { [weak self] peers in
             self?.peers = peers
         }
-        transport.onLog = { [weak self] message in
-            self?.status = message
+        transport.onLog = { message in
+            DiagnosticLog.shared.info(message)
         }
         transport.onTransferStatus = { [weak self] message in
             self?.status = message
@@ -104,17 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 try? invite.absoluteString.write(to: debugDir.appendingPathComponent("debug-invite.txt"), atomically: true, encoding: .utf8)
                 print("[BinderClip Debug] Ready pairing code: \(invite.absoluteString)")
             }
-            if self?.peers.isEmpty == true {
-                self?.showPairing()
-            }
-            let joinURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
-                .appendingPathComponent("debug-join.txt")
-            if let code = try? String(contentsOf: joinURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-               !code.isEmpty, code.hasPrefix("binderclip://invite") {
-                try? FileManager.default.removeItem(at: joinURL)
-                self?.transport.joinChain(inviteURL: code)
-            }
         }
         #endif
     }
@@ -125,12 +124,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        isStatusMenuOpen = true
         cachedActiveTab = activeBrowserTab()
         renderMenu()
+        menuNeedsRebuild = false
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        renderMenu()
+    func menuDidClose(_ menu: NSMenu) {
+        isStatusMenuOpen = false
+        if menuNeedsRebuild {
+            menuNeedsRebuild = false
+            renderMenu()
+            updateStatusIcon()
+        }
     }
 
     private func notifyIncoming(title: String, body: String) {
@@ -142,13 +148,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     private func updateStatusIcon() {
-        statusItem.button?.image = binderClipStatusIcon()
-        statusItem.button?.imagePosition = .imageOnly
+        guard let button = statusItem.button else { return }
+        button.image = binderClipStatusIcon()
+        button.title = ""
+        button.imagePosition = .imageOnly
         let hasConnectedPeers = peers.contains(where: \.connected)
         if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
-            statusItem.button?.toolTip = "BinderClip: \(status)"
+            button.toolTip = "BinderClip: \(status)"
+        } else if hasConnectedPeers {
+            button.toolTip = "BinderClip: Connected"
+        } else if peers.isEmpty {
+            button.toolTip = "BinderClip: Listening"
         } else {
-            statusItem.button?.toolTip = hasConnectedPeers ? "BinderClip: Connected" : "BinderClip: \(status)"
+            button.toolTip = "BinderClip: Waiting for device"
         }
     }
 
@@ -165,12 +177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         if #available(macOS 14.0, *) {
-            menu.addItem(.sectionHeader(title: "This Chain"))
+            menu.addItem(.sectionHeader(title: "Paired Devices"))
         } else {
-            let chainHeader = NSMenuItem(title: "This Chain", action: nil, keyEquivalent: "")
-            chainHeader.isEnabled = false
-            chainHeader.indentationLevel = 0
-            menu.addItem(chainHeader)
+            let header = NSMenuItem(title: "Paired Devices", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            header.indentationLevel = 0
+            menu.addItem(header)
         }
 
         let thisMac = NSMenuItem(title: "\(transport.localDeviceName) (current)", action: nil, keyEquivalent: "")
@@ -179,7 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         menu.addItem(thisMac)
 
         for peer in peers {
-            let title = peer.connected ? peer.name : "\(peer.name) (reconnecting)"
+            let title = peer.connected ? peer.name : "\(peer.name) (waiting)"
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
             if !peer.connected {
@@ -193,19 +205,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
         menu.addItem(.separator())
 
-        if peers.isEmpty {
-            let create = NSMenuItem(title: "Create New Chain", action: #selector(createNewChain), keyEquivalent: "n")
-            create.target = self
-            menu.addItem(create)
-
-            let join = NSMenuItem(title: "Join Chain…", action: #selector(joinChain), keyEquivalent: "j")
-            join.target = self
-            menu.addItem(join)
-        }
-
         let pair = NSMenuItem(title: "Add Device", action: #selector(showPairing), keyEquivalent: "n")
         pair.target = self
         menu.addItem(pair)
+
+        let resetKey = NSMenuItem(title: "Reset Pairing Key", action: #selector(resetPairingKey), keyEquivalent: "")
+        resetKey.target = self
+        menu.addItem(resetKey)
 
         let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s")
         send.target = self
@@ -275,9 +281,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private func binderClipStatusIcon() -> NSImage? {
         let resource = Bundle.main.url(forResource: "BinderClipMenuIcon", withExtension: "svg")
             ?? Bundle.module.url(forResource: "BinderClipMenuIcon", withExtension: "svg")
-        guard let resource, let image = NSImage(contentsOf: resource) else { return nil }
-        image.size = NSSize(width: 18, height: 18)
-        image.isTemplate = true
+        if let resource, let image = NSImage(contentsOf: resource) {
+            image.size = NSSize(width: 18, height: 18)
+            image.isTemplate = true
+            return image
+        }
+        let image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "BinderClip")
+        image?.isTemplate = true
         return image
     }
 
@@ -306,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func deviceMenu(for peer: Peer) -> NSMenu {
         let details = NSMenu()
-        let status = NSMenuItem(title: peer.connected ? "Connected" : "Waiting To Reconnect", action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: peer.connected ? "Connected" : "Waiting for device", action: nil, keyEquivalent: "")
         status.isEnabled = false; details.addItem(status)
         let route = NSMenuItem(title: peer.endpoint.host == "unknown" ? "Route Unknown" : "Route: \(peer.endpoint.host):\(peer.endpoint.port)", action: nil, keyEquivalent: "")
         route.isEnabled = false; details.addItem(route)
@@ -322,51 +332,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let rename = NSMenuItem(title: peer.id == transport.localDeviceID ? "Rename This Mac…" : "Rename Device…", action: #selector(renameDevice(_:)), keyEquivalent: "")
         rename.target = self; rename.representedObject = peer.id; details.addItem(rename)
         details.addItem(.separator())
-        let remove = NSMenuItem(title: "Remove From Chain", action: #selector(removePeer(_:)), keyEquivalent: "")
+        let remove = NSMenuItem(title: peer.id == transport.localDeviceID ? "Unpair All Devices…" : "Unpair Device…", action: #selector(removePeer(_:)), keyEquivalent: "")
         remove.target = self; remove.representedObject = peer.id; details.addItem(remove)
         return details
     }
 
     @objc private func showPairing() {
-        peerCountBeforePairing = peers.count
-        pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.peerIdsBeforePairing = Set(self.peers.filter(\.connected).map(\.id))
+            self.pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }
+        }
     }
 
-    @objc private func createNewChain() {
+    @objc private func resetPairingKey() {
         let alert = NSAlert()
-        alert.messageText = "Create a New Chain?"
-        alert.informativeText = "This rotates the group key, clears the device list, and lets you share a fresh pairing code. Existing devices will no longer be accepted."
-        alert.addButton(withTitle: "Create")
+        alert.messageText = "Generate a New Pairing Key?"
+        alert.informativeText = "This rotates the 256-bit PSK, clears the paired device list, and generates a fresh pairing code. Existing paired devices must re-pair."
+        alert.addButton(withTitle: "Generate")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            transport.startNewChain()
+            transport.resetPairingKey()
             showPairing()
         }
     }
 
-    @objc private func joinChain() {
-        let alert = NSAlert()
-        alert.messageText = "Join a Chain"
-        alert.informativeText = "Paste a BinderClip pairing code from another device's 'Create New Chain' or 'Add Device' window:"
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        input.placeholderString = "binderclip://invite?..."
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Join")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = input
-        if alert.runModal() == .alertFirstButtonReturn {
-            let code = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !code.isEmpty {
-                transport.joinChain(inviteURL: code)
-            }
-        }
-    }
-
     private func checkPairingCompletion() {
-        guard let before = peerCountBeforePairing else { return }
-        let connectedCount = peers.filter(\.connected).count
-        if connectedCount > before {
-            peerCountBeforePairing = nil
+        guard let before = peerIdsBeforePairing else { return }
+        let connectedIds = Set(peers.filter(\.connected).map(\.id))
+        if !connectedIds.subtracting(before).isEmpty {
+            peerIdsBeforePairing = nil
             pairing.closeWithSuccess()
         }
     }
@@ -425,9 +420,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             if let appleScript = NSAppleScript(source: script) {
                 let result = appleScript.executeAndReturnError(&error)
                 if let errNumber = error?[NSAppleScript.errorNumber] as? Int, errNumber == -1743 {
-                    automationPermissionRequired = true
+                    if !automationPermissionRequired { automationPermissionRequired = true }
                 } else if error == nil {
-                    automationPermissionRequired = false
+                    if automationPermissionRequired { automationPermissionRequired = false }
                 }
                 if let str = result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
                    let url = URL(string: str),
@@ -441,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func sendCurrentClipboard() {
         clipboard.sendCurrentClipboard()
-        ToastHUD.shared.show(message: "Sent clipboard to chain", icon: "doc.on.clipboard.fill")
+        ToastHUD.shared.show(message: "Sent clipboard", icon: "doc.on.clipboard.fill")
     }
 
     @objc private func sendBrowserTabToTarget(_ sender: NSMenuItem) {
@@ -481,8 +476,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let currentName = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
         guard let currentName else { return }
         let alert = NSAlert()
-        alert.messageText = id == transport.localDeviceID ? "Rename This Mac in Chain" : "Rename Device in Chain"
-        alert.informativeText = "Enter a new name for this device across the BinderClip chain:"
+        alert.messageText = id == transport.localDeviceID ? "Rename This Mac" : "Rename Device"
+        alert.informativeText = "Enter a new name for this device:"
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         input.stringValue = currentName
         alert.accessoryView = input
@@ -503,19 +498,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard let name else { return }
         if id == transport.localDeviceID {
             let alert = NSAlert()
-            alert.messageText = "Leave This Chain?"
-            alert.informativeText = "You will leave the chain. Recreate a new chain or join another with a pairing code."
-            alert.addButton(withTitle: "Leave")
+            alert.messageText = "Unpair All Devices?"
+            alert.informativeText = "This clears all paired devices and saved keys. You can generate a fresh pairing code at any time."
+            alert.addButton(withTitle: "Unpair")
             alert.addButton(withTitle: "Cancel")
-            if alert.runModal() == .alertFirstButtonReturn { transport.leaveChain() }
+            if alert.runModal() == .alertFirstButtonReturn { transport.unpairAll() }
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Remove \(name) From This Chain?"
-        alert.informativeText = "It will no longer receive new BinderClip updates or be accepted into this chain."
-        alert.addButton(withTitle: "Remove")
+        alert.messageText = "Unpair \(name)?"
+        alert.informativeText = "This device will no longer sync clipboard text or images with this Mac."
+        alert.addButton(withTitle: "Unpair")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn { transport.removeFromChain(id) }
+        if alert.runModal() == .alertFirstButtonReturn { transport.removePeer(id) }
     }
 
     @objc private func enableLaunchAtLogin() {

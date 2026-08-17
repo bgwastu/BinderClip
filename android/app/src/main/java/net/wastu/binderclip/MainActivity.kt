@@ -12,7 +12,6 @@ import android.provider.Settings
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -80,7 +79,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -89,13 +87,33 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import android.widget.Toast
 import java.text.DateFormat
 import java.util.Date
 
 class MainActivity : AppCompatActivity() {
     private var permissionRevision by mutableIntStateOf(0)
-    private val scanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        result.data?.getStringExtra("uri")?.let(::pair)
+    private val qrScanner = registerForActivityResult(io.github.g00fy2.quickie.ScanCustomCode()) { result ->
+        when (result) {
+            is io.github.g00fy2.quickie.QRResult.QRSuccess -> {
+                val uri = result.content.rawValue
+                android.util.Log.i("BinderClip", "QR Scanned successfully: $uri")
+                if (!uri.isNullOrBlank()) {
+                    pair(uri)
+                }
+            }
+            is io.github.g00fy2.quickie.QRResult.QRUserCanceled -> {
+                android.util.Log.d("BinderClip", "QR Scan cancelled by user")
+            }
+            is io.github.g00fy2.quickie.QRResult.QRMissingPermission -> {
+                android.util.Log.w("BinderClip", "Camera permission missing for scanner")
+                requestCamera.launch(Manifest.permission.CAMERA)
+            }
+            is io.github.g00fy2.quickie.QRResult.QRError -> {
+                android.util.Log.e("BinderClip", "QR Scan error", result.exception)
+                Toast.makeText(this, "Scan error: ${result.exception.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         permissionRevision += 1
@@ -106,7 +124,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); DiagnosticLog.initialize(this); startService(BinderClipService.ACTION_START)
-        intent?.dataString?.takeIf { it.startsWith("binderclip://invite") }?.let(::pair)
+        intent?.dataString?.takeIf { it.startsWith("binderclip://") }?.let(::pair)
         setContent {
             BinderClipTheme {
                 val state by AppRuntime.state.collectAsState()
@@ -137,7 +155,6 @@ class MainActivity : AppCompatActivity() {
                     onOpenAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                     onRequestBatteryOptimization = ::requestBatteryOptimization,
                     onOpenAppDetails = ::openAutoStartSettings,
-                    onRequestInvite = { startService(BinderClipService.ACTION_REQUEST_INVITE) },
                     onSend = { startService(BinderClipService.ACTION_SEND_CURRENT) },
                     onCopy = { startService(BinderClipService.ACTION_COPY_PENDING) },
                     onReconnect = { startService(BinderClipService.ACTION_SEARCH_RECONNECT) },
@@ -156,10 +173,6 @@ class MainActivity : AppCompatActivity() {
                             deviceName = name
                         )
                     },
-                    onCreateChain = {
-                        startService(BinderClipService.ACTION_CREATE_CHAIN)
-                    },
-                    onJoinChain = ::scan,
                     onRefresh = { startService(BinderClipService.ACTION_SEARCH_RECONNECT) },
                 )
             }
@@ -173,21 +186,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent); setIntent(intent); intent.dataString?.takeIf { it.startsWith("binderclip://invite") }
+        super.onNewIntent(intent); setIntent(intent); intent.dataString?.takeIf { it.startsWith("binderclip://") }
             ?.let(::pair)
     }
 
     private fun scan() {
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scanner.launch(
-            Intent(
-                this,
-                QrScannerActivity::class.java
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            qrScanner.launch(
+                io.github.g00fy2.quickie.config.ScannerConfig.build {
+                    setBarcodeFormats(listOf(io.github.g00fy2.quickie.config.BarcodeFormat.FORMAT_QR_CODE))
+                    setShowTorchToggle(true)
+                    setShowCloseButton(true)
+                    setKeepScreenOn(true)
+                }
             )
-        )
-        else requestCamera.launch(Manifest.permission.CAMERA)
+        } else {
+            requestCamera.launch(Manifest.permission.CAMERA)
+        }
     }
 
     private fun pair(uri: String) {
+        android.util.Log.i("BinderClip", "Pairing with URI: $uri")
+        val macName = SyncProtocol.parsePairingUrl(uri)?.deviceName?.takeIf { it.isNotBlank() }
+        Toast.makeText(this, macName ?: "Connecting…", Toast.LENGTH_SHORT).show()
         ContextCompat.startForegroundService(
             this,
             Intent(this, BinderClipService::class.java).setAction(BinderClipService.ACTION_PAIR)
@@ -313,7 +334,6 @@ private fun BinderClipScreen(
     onOpenAccessibility: () -> Unit,
     onRequestBatteryOptimization: () -> Unit,
     onOpenAppDetails: () -> Unit,
-    onRequestInvite: () -> Unit,
     onSend: () -> Unit,
     onCopy: () -> Unit,
     onReconnect: () -> Unit,
@@ -321,22 +341,19 @@ private fun BinderClipScreen(
     onDisableAccessibility: () -> Unit,
     onRemove: (String) -> Unit,
     onUpdateDeviceName: (String?, String?) -> Unit,
-    onCreateChain: () -> Unit,
-    onJoinChain: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var selectedDeviceId by remember { mutableStateOf<String?>(null) }
     var showLogs by remember { mutableStateOf(false) }
-    val pairingUrl by AppRuntime.pairingUrl.collectAsState()
     val diagnosticEvents by DiagnosticLog.events.collectAsState()
     val devices = buildList {
         // Exclude synthetic alternate-host entries (used only as reconnect
         // candidates) so they don't appear as duplicate devices in the list.
         state.peer?.let(::add)
         addAll(state.members.filter { !it.deviceId.contains('@') })
-        if ((state.peer != null || state.hosting) && none { it.deviceId == state.localDeviceId }) add(
+        if (state.peer != null && none { it.deviceId == state.localDeviceId }) add(
             RememberedPeer(
                 DeviceNames.android(context),
                 localIpAddress(context),
@@ -449,50 +466,30 @@ private fun BinderClipScreen(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 item {
-                    ChainHeader(status = state.status, onReconnect = {
+                    PairedDevicesHeader(phase = state.connectionPhase, onReconnect = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         onReconnect()
                     })
                 }
-                if (devices.isEmpty()) item { EmptyChain() }
+                if (devices.isEmpty()) item { EmptyPairedDevices() }
                 else items(devices.size, key = { devices[it].deviceId }) { index ->
                     val device = devices[index]
                     DeviceRow(
                         device,
                         isCurrentDevice = device.deviceId == state.localDeviceId,
+                        phase = state.connectionPhase,
                         onClick = { selectedDeviceId = device.deviceId })
                 }
                 if (devices.isNotEmpty()) item { Spacer(Modifier.height(12.dp)) }
             item {
-                if (devices.isEmpty()) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        FilledTonalButton(onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onCreateChain()
-                        }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                            Icon(
-                                Icons.Outlined.Add,
-                                contentDescription = null
-                            ); Spacer(Modifier.width(10.dp)); Text("Create New Chain")
-                        }
-                        FilledTonalButton(onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onJoinChain()
-                        }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                            Icon(
-                                Icons.Outlined.QrCodeScanner,
-                                contentDescription = null
-                            ); Spacer(Modifier.width(10.dp)); Text("Join Chain")
-                        }
-                    }
-                } else FilledTonalButton(onClick = {
+                FilledTonalButton(onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onRequestInvite()
+                    onScan()
                 }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                     Icon(
-                        Icons.Outlined.Add,
+                        Icons.Outlined.QrCodeScanner,
                         contentDescription = null
-                    ); Spacer(Modifier.width(10.dp)); Text("Add device")
+                    ); Spacer(Modifier.width(10.dp)); Text("Scan QR to Pair")
                 }
             }
             item {
@@ -607,7 +604,11 @@ private fun BinderClipScreen(
             title = { Text(target.name) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (target.connected) "Connected" else "Waiting to reconnect")
+                    Text(
+                        if (target.connected) "Connected"
+                        else if (state.connectionPhase == ConnectionPhase.Connecting) "Connecting…"
+                        else "Reconnecting…"
+                    )
                     Text("IP: ${target.host.takeIf { it.isNotBlank() } ?: "Unavailable"}")
                 }
             },
@@ -620,7 +621,7 @@ private fun BinderClipScreen(
                     }) { Text("Rename") }
                     TextButton(onClick = {
                         onRemove(target.deviceId); selectedDeviceId = null
-                    }) { Text(if (isCurrentDevice) "Leave Chain" else "Remove From Chain") }
+                    }) { Text(if (isCurrentDevice) "Unpair This Device" else "Unpair Device") }
                 }
             },
             dismissButton = { TextButton(onClick = { selectedDeviceId = null }) { Text("Close") } },
@@ -629,10 +630,10 @@ private fun BinderClipScreen(
     deviceToRename?.let { target ->
         AlertDialog(
             onDismissRequest = { deviceToRename = null },
-            title = { Text("Rename in Chain") },
+            title = { Text("Rename Device") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Enter a new name for this device across the chain:")
+                    Text("Enter a new name for this device:")
                     androidx.compose.material3.OutlinedTextField(
                         value = renameInput,
                         onValueChange = { renameInput = it },
@@ -656,7 +657,6 @@ private fun BinderClipScreen(
             dismissButton = { TextButton(onClick = { deviceToRename = null }) { Text("Cancel") } }
         )
     }
-    pairingUrl?.let { url -> PairingCodeDialog(url, state, onConnected = { AppRuntime.pairingUrl.value = null }) }
     if (showLogs) {
         var logQuery by remember { mutableStateOf("") }
         var selectedFilter by remember { mutableStateOf<DiagnosticLevel?>(null) }
@@ -776,18 +776,18 @@ private fun PermissionRow(need: PermissionNeed) = ListItem(
 )
 
 @Composable
-private fun EmptyChain() =
-    ListItem(headlineContent = { Text("No devices yet") }, supportingContent = { Text("Scan a code to join.") })
+private fun EmptyPairedDevices() =
+    ListItem(headlineContent = { Text("No devices paired yet") }, supportingContent = { Text("Scan a QR code from your Mac to pair.") })
 
 @Composable
-private fun ChainHeader(status: String, onReconnect: () -> Unit) = Row(
+private fun PairedDevicesHeader(phase: ConnectionPhase, onReconnect: () -> Unit) = Row(
     modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.SpaceBetween
 ) {
-    Text("This chain", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+    Text("Paired devices", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        if (status.startsWith("Waiting") || status.startsWith("Searching") || status.startsWith("Connection")) {
+        if (phase == ConnectionPhase.Connecting || phase == ConnectionPhase.Reconnecting) {
             IconButton(onClick = onReconnect, modifier = Modifier.size(24.dp)) {
                 Icon(
                     Icons.Outlined.Refresh,
@@ -809,7 +809,7 @@ private fun SectionTitle(text: String, topPadding: androidx.compose.ui.unit.Dp =
 )
 
 @Composable
-private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, onClick: () -> Unit) {
+private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, phase: ConnectionPhase, onClick: () -> Unit) {
     val container = if (isCurrentDevice) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
     Box(
         modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(MaterialTheme.shapes.medium).background(container)
@@ -840,7 +840,10 @@ private fun DeviceRow(member: RememberedPeer, isCurrentDevice: Boolean, onClick:
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(member.connected, 7.dp); Spacer(Modifier.width(8.dp))
                 Text(
-                    if (isCurrentDevice) "This device" else if (member.connected) "Connected" else "Searching",
+                    if (isCurrentDevice) "This device"
+                    else if (member.connected) "Connected"
+                    else if (phase == ConnectionPhase.Connecting) "Connecting…"
+                    else "Reconnecting…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -860,66 +863,6 @@ private fun PreferenceToggle(title: String, summary: String, checked: Boolean, o
     headlineContent = { Text(title) },
     supportingContent = { Text(summary) },
     trailingContent = { Switch(checked = checked, onCheckedChange = onChanged) })
-
-@Composable
-private fun PairingCodeDialog(
-    url: String,
-    state: AppState,
-    onConnected: () -> Unit,
-) {
-    // Invite TTL is 300 seconds on the host side.
-    val inviteTTL = 300
-    var secondsLeft by remember(url) { mutableIntStateOf(inviteTTL) }
-    LaunchedEffect(url) {
-        secondsLeft = inviteTTL
-        while (secondsLeft > 0) {
-            kotlinx.coroutines.delay(1000)
-            secondsLeft -= 1
-        }
-    }
-    // Auto-close as soon as a new device connects to this chain.
-    val connectedPeers = state.members.count { it.connected && it.deviceId != state.localDeviceId }
-    LaunchedEffect(connectedPeers, url) {
-        if (connectedPeers > 0) onConnected()
-    }
-    val image = remember(url) {
-        val matrix = com.google.zxing.MultiFormatWriter().encode(url, com.google.zxing.BarcodeFormat.QR_CODE, 640, 640)
-        android.graphics.Bitmap.createBitmap(640, 640, android.graphics.Bitmap.Config.ARGB_8888).also { bitmap ->
-            for (x in 0 until 640) for (y in 0 until 640) bitmap.setPixel(
-                x,
-                y,
-                if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
-            )
-        }.asImageBitmap()
-    }
-    AlertDialog(
-        onDismissRequest = onConnected,
-        title = { Text("Add a device") },
-        text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "Scan this code with BinderClip on the device you want to add. " +
-                        "It works on the same Wi-Fi or a mesh network.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(8.dp))
-                Image(
-                    image,
-                    contentDescription = "BinderClip pairing code",
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                val formatted = "%d:%02d".format(secondsLeft / 60, secondsLeft % 60)
-                Text(
-                    if (secondsLeft == 0) "Code expired — generate a new one" else "Code expires in $formatted",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (secondsLeft == 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onConnected) { Text("Done") } })
-}
 
 /** The current device's IP as assigned by the OS to the active network, which
  *  is correct regardless of VLAN, mesh VPN, mobile data, or any subnet. Falls

@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -21,6 +22,7 @@
 
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:label="${appLabel}"
         android:theme="@style/Theme.BinderClip">
@@ -33,7 +35,6 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/image_paths" />
         </provider>
-        <activity android:name=".QrScannerActivity" android:exported="false" />
         <activity android:name=".ShareReceiverActivity" android:exported="true" android:theme="@style/Theme.BinderClip">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -55,14 +56,14 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="binderclip" android:host="invite" />
+                <data android:scheme="binderclip" android:host="pair" />
             </intent-filter>
         </activity>
 
         <service
             android:name=".BinderClipService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="dataSync" />
 
         <service
             android:name=".ClipboardAccessibilityService"

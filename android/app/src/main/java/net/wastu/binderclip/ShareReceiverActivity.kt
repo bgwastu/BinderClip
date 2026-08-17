@@ -115,9 +115,10 @@ class ShareReceiverActivity : ComponentActivity() {
         }
 
         val store = DeviceStore(this)
+        val live = AppRuntime.state.value
         val candidateDevices = buildList {
-            store.peer?.let(::add)
-            addAll(store.members)
+            (live.peer ?: store.peer)?.let(::add)
+            addAll(if (live.members.isNotEmpty()) live.members else store.members)
         }.distinctBy { it.deviceId }.filter { it.deviceId != store.deviceId }
 
         val isUrl = payload is SharedPayload.Text && (
@@ -262,7 +263,7 @@ private fun ShareDevicePickerScreen(
                                 supportingContent = {
                                     Text(
                                         if (isUrl) "Opens browser on ${device.name}"
-                                        else if (device.connected) "Connected" else "Direct route"
+                                        else if (device.connected) "Connected" else "Reconnecting…"
                                     )
                                 },
                                 leadingContent = {

@@ -76,7 +76,7 @@ class DeviceStore(context: Context) {
                 port = prefs.getInt("peer_port", 39_421),
                 deviceId = prefs.getString("peer_id", "") ?: "",
                 platform = prefs.getString("peer_platform", "macOS") ?: "macOS",
-                connected = prefs.getBoolean("peer_connected", false)
+                connected = false
             )
         }
         set(value) = prefs.edit().apply {
@@ -88,11 +88,11 @@ class DeviceStore(context: Context) {
                 putInt("peer_port", value.port)
                 putString("peer_id", value.deviceId)
                 putString("peer_platform", value.platform)
-                putBoolean("peer_connected", value.connected)
+                putBoolean("peer_connected", false)
             }
         }.apply()
 
-    /** Alternate addresses for the primary peer (mesh + LAN + …) so reconnect can
+    /** Alternate addresses for the primary peer (LAN, Tailscale, and other unicast) so reconnect can
      *  fall back to a reachable route when one interface drops. */
     var peerCandidates: List<String>
         get() = prefs.getString("peer_candidates", "[]")?.let { raw ->
@@ -114,7 +114,7 @@ class DeviceStore(context: Context) {
                     add(RememberedPeer(
                         name = item.optString("name", "Device"), host = item.optString("host"),
                         port = item.optInt("port", 39_421), deviceId = id,
-                        platform = item.optString("platform", "Android"), connected = item.optBoolean("connected"),
+                        platform = item.optString("platform", "Android"), connected = false,
                     ))
                 }
             }
@@ -122,13 +122,9 @@ class DeviceStore(context: Context) {
         set(value) = prefs.edit().putString("members", JSONArray().apply {
             value.distinctBy { it.deviceId }.take(8).forEach { member -> put(JSONObject().apply {
                 put("id", member.deviceId); put("name", member.name); put("host", member.host)
-                put("port", member.port); put("platform", member.platform); put("connected", member.connected)
+                put("port", member.port); put("platform", member.platform); put("connected", false)
             }) }
         }.toString()).apply()
-
-    var hosting: Boolean
-        get() = prefs.getBoolean("hosting", false)
-        set(value) = prefs.edit().putBoolean("hosting", value).apply()
 
     fun upsertMembers(incoming: List<RememberedPeer>) {
         val merged = (members.associateBy { it.deviceId } + incoming.associateBy { it.deviceId }).values.take(8)
@@ -141,22 +137,21 @@ class DeviceStore(context: Context) {
     }
     fun removeMember(deviceId: String) { members = members.filterNot { it.deviceId == deviceId } }
 
-    /** Start a brand-new chain: fresh group key, empty roster, this device hosts. */
-    fun createNewChain() {
+    /** Reset pairing key: fresh PSK key, empty roster. */
+    fun resetPairingKey() {
         val key = ByteArray(32).also { SecureRandom().nextBytes(it) }
         groupKey = key
         peer = null
+        peerCandidates = emptyList()
         members = emptyList()
-        hosting = true
     }
 
-    /** Leave the current chain. Keeps the stable device identity so the device
-     *  can re-create or re-join a chain without being treated as brand-new. */
-    fun leaveChain() {
+    /** Unpair and clear saved keys and member roster. Preserves stable device ID. */
+    fun unpair() {
         groupKey = null
         peer = null
+        peerCandidates = emptyList()
         members = emptyList()
-        hosting = false
     }
     var pendingText: String?
         get() = prefs.getString("pending_text", null)

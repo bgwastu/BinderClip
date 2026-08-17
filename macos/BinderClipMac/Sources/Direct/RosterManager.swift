@@ -1,15 +1,85 @@
 import Foundation
+import Security
 
-/// Manages identity, peer roster, host target, and tombstoned devices to ensure
-/// deterministic chain state and prevent zombie peer resurrection.
-final class RosterManager {
+public struct DirectEndpoint: Codable, Hashable, Sendable {
+    public let host: String
+    public let port: UInt16
+
+    public init(host: String, port: UInt16) {
+        self.host = host
+        self.port = port
+    }
+}
+
+public struct Peer: Codable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public var name: String
+    public var endpoint: DirectEndpoint
+    public var connected: Bool
+    public var platform: String
+
+    public init(id: String, name: String, endpoint: DirectEndpoint, connected: Bool, platform: String = "Android") {
+        self.id = id
+        self.name = name
+        self.endpoint = endpoint
+        self.connected = connected
+        self.platform = platform
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, endpoint, connected, platform }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        endpoint = try values.decode(DirectEndpoint.self, forKey: .endpoint)
+        connected = try values.decode(Bool.self, forKey: .connected)
+        platform = try values.decodeIfPresent(String.self, forKey: .platform) ?? "Android"
+    }
+}
+
+/// Small owner-only file store for pairing secrets. Avoids Keychain ACL prompts.
+final class PrivateStateStore: @unchecked Sendable {
+    private let file: URL
+
+    init() {
+        let manager = FileManager.default
+        let root = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
+        try? manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        file = root.appendingPathComponent("direct-secrets.json")
+    }
+
+    func data(account: String) -> Data? {
+        guard let stored = contents()[account] else { return nil }
+        return Data(base64Encoded: stored)
+    }
+
+    func set(_ data: Data, account: String) {
+        var values = contents()
+        values[account] = data.base64EncodedString()
+        guard let encoded = try? JSONEncoder().encode(values) else { return }
+        try? encoded.write(to: file, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    private func contents() -> [String: String] {
+        guard let data = try? Data(contentsOf: file),
+              let values = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return values
+    }
+}
+
+/// Manages identity, peer roster, and the shared pairing key.
+final class RosterManager: @unchecked Sendable {
     private let secureStore = PrivateStateStore()
     private(set) var localID: String
     private(set) var localName: String
     private(set) var groupKey: Data
-    private(set) var hostTarget: HostTarget?
     private(set) var peers: [String: Peer] = [:]
-    private var tombstones: Set<String> = []
 
     init() {
         if let savedName = UserDefaults.standard.string(forKey: "device.custom_name")?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -30,14 +100,15 @@ final class RosterManager {
         if let existingKey = secureStore.data(account: "group-key"), existingKey.count == 32 {
             self.groupKey = existingKey
         } else {
-            let generated = DirectCrypto.randomBytes(count: 32)
+            let generated = Self.generateRandomBytes(count: 32)
             secureStore.set(generated, account: "group-key")
             self.groupKey = generated
         }
 
         loadPeers()
-        loadHostTarget()
-        loadTombstones()
+        markAllDisconnected()
+        UserDefaults.standard.removeObject(forKey: "host-target")
+        UserDefaults.standard.removeObject(forKey: "tombstoned-peers")
     }
 
     func setLocalName(_ name: String) -> String {
@@ -53,81 +124,24 @@ final class RosterManager {
     }
 
     func rotateGroupKey() -> Data {
-        let fresh = DirectCrypto.randomBytes(count: 32)
+        let fresh = Self.generateRandomBytes(count: 32)
         self.groupKey = fresh
         secureStore.set(fresh, account: "group-key")
         self.peers.removeAll()
-        self.tombstones.removeAll()
-        self.hostTarget = nil
-        clearHostTargetStorage()
-        clearTombstonesStorage()
         persistPeers()
         return fresh
     }
 
-    func adoptGroupKey(_ key: Data) {
-        self.groupKey = key
-        secureStore.set(key, account: "group-key")
-        self.tombstones.removeAll()
-        clearTombstonesStorage()
-    }
-
-    func clearChainState() {
+    func clearPairingState() {
         self.peers.removeAll()
-        self.tombstones.removeAll()
-        self.hostTarget = nil
-        clearHostTargetStorage()
-        clearTombstonesStorage()
         persistPeers()
-    }
-
-    func setHostTarget(_ target: HostTarget) {
-        self.hostTarget = target
-        persistHostTarget()
-    }
-
-    func updateHostTargetEndpoints(_ endpoints: [DirectEndpoint]) {
-        guard var target = hostTarget else { return }
-        var current = target.endpoints
-        for ep in endpoints where !current.contains(ep) {
-            current.append(ep)
-        }
-        target.endpoints = current
-        self.hostTarget = target
-        persistHostTarget()
-    }
-
-    func clearHostTarget() {
-        self.hostTarget = nil
-        clearHostTargetStorage()
-    }
-
-    func isTombstoned(_ peerID: String) -> Bool {
-        tombstones.contains(peerID)
-    }
-
-    func clearTombstones() {
-        tombstones.removeAll()
-        clearTombstonesStorage()
     }
 
     func addOrUpdatePeer(_ peer: Peer) -> Bool {
         guard peer.id != localID else { return false }
-        if tombstones.contains(peer.id) {
-            // Tombstoned peer cannot be added back via passive sync
-            return false
-        }
         peers[peer.id] = peer
         persistPeers()
         return true
-    }
-
-    func reAdmitPeer(_ peer: Peer) {
-        guard peer.id != localID else { return }
-        tombstones.remove(peer.id)
-        persistTombstones()
-        peers[peer.id] = peer
-        persistPeers()
     }
 
     func setPeerConnected(_ peerID: String, connected: Bool, endpoint: DirectEndpoint? = nil) {
@@ -137,6 +151,13 @@ final class RosterManager {
             peer.endpoint = endpoint
         }
         peers[peerID] = peer
+        persistPeers()
+    }
+
+    func markAllDisconnected() {
+        for key in peers.keys {
+            peers[key]?.connected = false
+        }
         persistPeers()
     }
 
@@ -150,82 +171,19 @@ final class RosterManager {
     }
 
     func removePeer(id: String) {
-        guard id != localID else {
-            clearChainState()
-            return
-        }
         peers.removeValue(forKey: id)
-        tombstones.insert(id)
-        if hostTarget?.id == id {
-            clearHostTarget()
-        }
         persistPeers()
-        persistTombstones()
     }
 
     func peerSnapshot() -> [Peer] {
         peers.values.sorted { $0.name < $1.name }
     }
 
-    func rosterPayload(localAddresses: [String], port: UInt16) -> [[String: Any]] {
-        var result: [[String: Any]] = [[
-            "id": localID,
-            "name": localName,
-            "host": localAddresses.first ?? "",
-            "port": Int(port),
-            "platform": "macOS",
-            "connected": true
-        ]]
-        result += peers.values.sorted { $0.name < $1.name }.map { peer in
-            [
-                "id": peer.id,
-                "name": peer.name,
-                "host": peer.endpoint.host,
-                "port": Int(peer.endpoint.port),
-                "platform": peer.platform,
-                "connected": peer.connected
-            ]
-        }
-        return result
+    private static func generateRandomBytes(count: Int) -> Data {
+        var bytes = [UInt8](repeating: 0, count: count)
+        _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+        return Data(bytes)
     }
-
-    func applyRemoteRoster(_ members: [[String: Any]], fallbackHost: String, fallbackPort: UInt16) -> [Peer] {
-        var changed = false
-        for member in members {
-            guard let mid = member["id"] as? String, mid != localID else { continue }
-            if tombstones.contains(mid) { continue }
-
-            let name = member["name"] as? String ?? peers[mid]?.name ?? "Device"
-            let hostStr = (member["host"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? peers[mid]?.endpoint.host ?? fallbackHost
-            let portVal = (member["port"] as? Int).map { UInt16($0) } ?? peers[mid]?.endpoint.port ?? fallbackPort
-            let platform = member["platform"] as? String ?? peers[mid]?.platform ?? "Android"
-            let isConnected = (member["connected"] as? Bool) ?? (peers[mid]?.connected ?? false)
-
-            let peer = Peer(
-                id: mid,
-                name: name,
-                endpoint: DirectEndpoint(host: hostStr, port: portVal),
-                connected: isConnected,
-                platform: platform
-            )
-            peers[mid] = peer
-            changed = true
-
-            if hostTarget?.id == mid && !hostStr.isEmpty && hostStr != "unknown" {
-                let ep = DirectEndpoint(host: hostStr, port: portVal)
-                if !(hostTarget?.endpoints.contains(ep) ?? false) {
-                    hostTarget?.endpoints.append(ep)
-                    persistHostTarget()
-                }
-            }
-        }
-        if changed {
-            persistPeers()
-        }
-        return peerSnapshot()
-    }
-
-    // MARK: - Persistence
 
     private func loadPeers() {
         guard let data = UserDefaults.standard.data(forKey: "peers"),
@@ -234,34 +192,9 @@ final class RosterManager {
     }
 
     private func persistPeers() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(Array(peers.values)), forKey: "peers")
-    }
-
-    private func loadHostTarget() {
-        guard let data = UserDefaults.standard.data(forKey: "host-target"),
-              let saved = try? JSONDecoder().decode(HostTarget.self, from: data) else { return }
-        hostTarget = saved
-    }
-
-    private func persistHostTarget() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(hostTarget), forKey: "host-target")
-    }
-
-    private func clearHostTargetStorage() {
-        UserDefaults.standard.removeObject(forKey: "host-target")
-    }
-
-    private func loadTombstones() {
-        if let array = UserDefaults.standard.stringArray(forKey: "tombstoned-peers") {
-            tombstones = Set(array)
+        let stored = Array(peers.values).map { peer in
+            Peer(id: peer.id, name: peer.name, endpoint: peer.endpoint, connected: false, platform: peer.platform)
         }
-    }
-
-    private func persistTombstones() {
-        UserDefaults.standard.set(Array(tombstones), forKey: "tombstoned-peers")
-    }
-
-    private func clearTombstonesStorage() {
-        UserDefaults.standard.removeObject(forKey: "tombstoned-peers")
+        UserDefaults.standard.set(try? JSONEncoder().encode(stored), forKey: "peers")
     }
 }

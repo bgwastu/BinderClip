@@ -14,15 +14,4 @@ final class ImageTransferTests: XCTestCase {
     func testRejectsUnsupportedMediaTypes() {
         XCTAssertThrowsError(try ImagePayload(mimeType: "image/gif", data: Data([1])))
     }
-
-    func testLargestImageChunkFitsAnEncryptedFrame() throws {
-        let key = Data(repeating: 3, count: 32)
-        let chunk = Data(repeating: 42, count: ImagePayload.chunkBytes)
-        let sealed = try DirectCrypto.seal([
-            "type": "mediaChunk", "id": UUID().uuidString, "index": 0,
-            "data": chunk.base64EncodedString(),
-        ], key: key)
-        let body = try JSONSerialization.data(withJSONObject: sealed, options: [])
-        XCTAssertNoThrow(try FrameCodec.encode(body))
-    }
 }

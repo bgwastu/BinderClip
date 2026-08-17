@@ -208,7 +208,7 @@ public final class WebSocketServer: @unchecked Sendable {
         }
     }
 
-    public func sendImage(_ image: ImagePayload) {
+    public func sendImage(_ image: ImagePayload, targetDeviceId: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
             guard image.sha256 != self.lastProcessedHash else { return }
@@ -216,7 +216,7 @@ public final class WebSocketServer: @unchecked Sendable {
 
             let packet = SyncProtocol.packImage(image: image, originId: self.localDeviceID)
             guard !packet.isEmpty else { return }
-            self.broadcastBinary(packet)
+            self.broadcastBinary(packet, targetPeerId: targetDeviceId)
             self.onTransferStatus?("Sent image (\(image.mimeType))")
         }
     }
@@ -485,9 +485,12 @@ public final class WebSocketServer: @unchecked Sendable {
         }
     }
 
-    private func broadcastBinary(_ data: Data, excludeSessionId: ObjectIdentifier? = nil) {
+    private func broadcastBinary(_ data: Data, targetPeerId: String? = nil, excludeSessionId: ObjectIdentifier? = nil) {
+        let locals = Self.localAddresses()
         for (id, session) in activeSessions where session.isAuthenticated {
             if let excludeSessionId, id == excludeSessionId { continue }
+            if let targetPeerId, session.peerID != targetPeerId { continue }
+            if SessionLiveness.shouldEvict(boundLocal: session.boundLocalAddress, currentLocals: locals) { continue }
             session.sendBinary(data)
         }
     }

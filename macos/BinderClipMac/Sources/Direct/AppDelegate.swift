@@ -147,13 +147,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         UNUserNotificationCenter.current().add(request)
     }
 
+    private var isTransferring: Bool {
+        status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image")
+    }
+
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
         button.image = binderClipStatusIcon()
         button.title = ""
         button.imagePosition = .imageOnly
         let hasConnectedPeers = peers.contains(where: \.connected)
-        if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
+        button.appearsDisabled = !hasConnectedPeers && !isTransferring
+        if isTransferring {
             button.toolTip = "BinderClip: \(status)"
         } else if hasConnectedPeers {
             button.toolTip = "BinderClip: Connected"
@@ -164,43 +169,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
     }
 
+    private func hostCaption() -> String {
+        let connected = peers.filter(\.connected)
+        if !connected.isEmpty {
+            return connected.count == 1 ? "1 connected" : "\(connected.count) connected"
+        }
+        if peers.isEmpty { return "Listening" }
+        if peers.count == 1 { return "Waiting for \(peers[0].name)" }
+        return "Waiting for devices"
+    }
+
+    private func addSectionHeader(_ title: String, to menu: NSMenu) {
+        if #available(macOS 14.0, *) {
+            menu.addItem(.sectionHeader(title: title))
+        } else {
+            let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+        }
+    }
+
+    private func peerSymbolName(for platform: String) -> String {
+        if platform == "macOS" { return "laptopcomputer" }
+        if #available(macOS 14.0, *) { return "smartphone" }
+        return "iphone"
+    }
+
     private func renderMenu() {
         let menu = statusMenu
         menu.removeAllItems()
         renderPendingPermissions(into: menu)
 
-        if status.contains("%") || status.hasPrefix("Sending image") || status.hasPrefix("Receiving image") {
-            let progressItem = NSMenuItem(title: "⚡ \(status)", action: nil, keyEquivalent: "")
+        if isTransferring {
+            let progressItem = NSMenuItem(title: status, action: nil, keyEquivalent: "")
             progressItem.isEnabled = false
             menu.addItem(progressItem)
             menu.addItem(.separator())
         }
 
-        if #available(macOS 14.0, *) {
-            menu.addItem(.sectionHeader(title: "Paired Devices"))
+        addSectionHeader(hostCaption(), to: menu)
+
+        if peers.isEmpty {
+            let empty = NSMenuItem(title: "No phones yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
         } else {
-            let header = NSMenuItem(title: "Paired Devices", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            header.indentationLevel = 0
-            menu.addItem(header)
-        }
-
-        let thisMac = NSMenuItem(title: "\(transport.localDeviceName) (current)", action: nil, keyEquivalent: "")
-        thisMac.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "This Mac")
-        thisMac.submenu = deviceMenu(for: Peer(id: transport.localDeviceID, name: transport.localDeviceName, endpoint: transport.localEndpoint, connected: true, platform: "macOS"))
-        menu.addItem(thisMac)
-
-        for peer in peers {
-            let title = peer.connected ? peer.name : "\(peer.name) (waiting)"
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
-            if !peer.connected {
-                let attributed = NSMutableAttributedString(string: title)
-                attributed.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: attributed.length))
-                item.attributedTitle = attributed
+            let ordered = peers.filter(\.connected) + peers.filter { !$0.connected }
+            for peer in ordered {
+                let title = peer.connected ? peer.name : "\(peer.name) (waiting)"
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.image = NSImage(systemSymbolName: peerSymbolName(for: peer.platform), accessibilityDescription: peer.platform)
+                if !peer.connected {
+                    let attributed = NSMutableAttributedString(string: title)
+                    attributed.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: NSRange(location: 0, length: attributed.length))
+                    item.attributedTitle = attributed
+                }
+                item.submenu = deviceMenu(for: peer)
+                menu.addItem(item)
             }
-            item.submenu = deviceMenu(for: peer)
-            menu.addItem(item)
         }
 
         menu.addItem(.separator())
@@ -209,23 +235,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         pair.target = self
         menu.addItem(pair)
 
-        let resetKey = NSMenuItem(title: "Reset Pairing Key", action: #selector(resetPairingKey), keyEquivalent: "")
-        resetKey.target = self
-        menu.addItem(resetKey)
-
-        let send = NSMenuItem(title: "Send Current Clipboard", action: #selector(sendCurrentClipboard), keyEquivalent: "s")
-        send.target = self
-        send.isEnabled = !peers.filter(\.connected).isEmpty
-        menu.addItem(send)
-
-        let browserTab = cachedActiveTab
-        let sendURLItem = NSMenuItem(
-            title: browserTab != nil ? "Send Current Browser Tab" : "Send Current Browser Tab (No active tab)",
-            action: nil,
-            keyEquivalent: "u"
-        )
-        if let browserTab {
-            sendURLItem.isEnabled = true
+        if let browserTab = cachedActiveTab {
+            let sendURLItem = NSMenuItem(title: "Send Current Browser Tab", action: nil, keyEquivalent: "u")
             let urlSubmenu = NSMenu()
             urlSubmenu.autoenablesItems = false
 
@@ -238,14 +249,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             let allItem = NSMenuItem(title: "All Connected Devices", action: #selector(sendBrowserTabToTarget(_:)), keyEquivalent: "")
             allItem.target = self
             allItem.representedObject = ["url": browserTab.url, "peerId": nil as String? as Any]
-            allItem.isEnabled = !peers.filter(\.connected).isEmpty
+            allItem.isEnabled = peers.contains(where: \.connected)
             urlSubmenu.addItem(allItem)
 
             if !peers.isEmpty {
                 urlSubmenu.addItem(.separator())
                 for peer in peers {
                     let peerItem = NSMenuItem(title: peer.name, action: #selector(sendBrowserTabToTarget(_:)), keyEquivalent: "")
-                    peerItem.image = NSImage(systemSymbolName: peer.platform == "macOS" ? "laptopcomputer" : "iphone", accessibilityDescription: peer.platform)
+                    peerItem.image = NSImage(systemSymbolName: peerSymbolName(for: peer.platform), accessibilityDescription: peer.platform)
                     peerItem.target = self
                     peerItem.representedObject = ["url": browserTab.url, "peerId": peer.id as String? as Any]
                     peerItem.isEnabled = peer.connected
@@ -253,26 +264,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 }
             }
             sendURLItem.submenu = urlSubmenu
-        } else {
-            sendURLItem.isEnabled = false
+            menu.addItem(sendURLItem)
         }
-        menu.addItem(sendURLItem)
 
-        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
-        logs.target = self
-        menu.addItem(logs)
+        menu.addItem(.separator())
 
-        let rawVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        #if DEBUG
-        let versionString = rawVersion.map { $0.contains("debug") ? $0 : "\($0)-debug" } ?? "debug"
-        let updatesTitle = "BinderClip Debug\tv\(versionString)"
-        #else
-        let versionString = rawVersion
-        let updatesTitle = versionString.map { "Check for Updates…\tv\($0)" } ?? "Check for Updates…"
-        #endif
-        let updates = NSMenuItem(title: updatesTitle, action: #selector(checkForUpdates), keyEquivalent: "")
-        updates.target = self
-        menu.addItem(updates)
+        let more = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
+        more.submenu = moreMenu()
+        menu.addItem(more)
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit BinderClip", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -293,12 +292,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     private func renderPendingPermissions(into menu: NSMenu) {
         var hasPendingPermission = false
-        let loginStatus = SMAppService.mainApp.status
-        if loginStatus != .enabled {
-            let needsApproval = loginStatus == .requiresApproval
-            let item = NSMenuItem(title: needsApproval ? "Allow Launch At Login" : "Enable Launch At Login", action: #selector(enableLaunchAtLogin), keyEquivalent: "")
-            item.target = self; menu.addItem(item); hasPendingPermission = true
-        }
         if localNetworkPermissionRequired {
             let item = NSMenuItem(title: "Allow Local Network", action: #selector(openPrivacySettings), keyEquivalent: "")
             item.target = self; menu.addItem(item); hasPendingPermission = true
@@ -314,26 +307,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         if hasPendingPermission { menu.addItem(.separator()) }
     }
 
+    private func moreMenu() -> NSMenu {
+        let more = NSMenu()
+        more.autoenablesItems = false
+
+        let loginStatus = SMAppService.mainApp.status
+        if loginStatus != .enabled {
+            let needsApproval = loginStatus == .requiresApproval
+            let login = NSMenuItem(
+                title: needsApproval ? "Allow Launch At Login" : "Enable Launch At Login",
+                action: #selector(enableLaunchAtLogin),
+                keyEquivalent: ""
+            )
+            login.target = self
+            more.addItem(login)
+            more.addItem(.separator())
+        }
+
+        let rename = NSMenuItem(title: "Rename This Mac…", action: #selector(renameDevice(_:)), keyEquivalent: "")
+        rename.target = self
+        rename.representedObject = transport.localDeviceID
+        more.addItem(rename)
+
+        if !peers.isEmpty {
+            let unpairAll = NSMenuItem(title: "Unpair All Devices…", action: #selector(unpairAllDevices), keyEquivalent: "")
+            unpairAll.target = self
+            more.addItem(unpairAll)
+        }
+
+        let resetKey = NSMenuItem(title: "Reset Pairing Key…", action: #selector(resetPairingKey), keyEquivalent: "")
+        resetKey.target = self
+        more.addItem(resetKey)
+
+        more.addItem(.separator())
+
+        let logs = NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l")
+        logs.target = self
+        more.addItem(logs)
+
+        let rawVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        #if DEBUG
+        let versionString = rawVersion.map { $0.contains("debug") ? $0 : "\($0)-debug" } ?? "debug"
+        let updatesTitle = "BinderClip Debug\tv\(versionString)"
+        #else
+        let versionString = rawVersion
+        let updatesTitle = versionString.map { "Check for Updates…\tv\($0)" } ?? "Check for Updates…"
+        #endif
+        let updates = NSMenuItem(title: updatesTitle, action: #selector(checkForUpdates), keyEquivalent: "")
+        updates.target = self
+        more.addItem(updates)
+        return more
+    }
+
     private func deviceMenu(for peer: Peer) -> NSMenu {
         let details = NSMenu()
+        details.autoenablesItems = false
         let status = NSMenuItem(title: peer.connected ? "Connected" : "Waiting for device", action: nil, keyEquivalent: "")
-        status.isEnabled = false; details.addItem(status)
-        let route = NSMenuItem(title: peer.endpoint.host == "unknown" ? "Route Unknown" : "Route: \(peer.endpoint.host):\(peer.endpoint.port)", action: nil, keyEquivalent: "")
-        route.isEnabled = false; details.addItem(route)
-        if peer.id != transport.localDeviceID {
-            details.addItem(.separator())
-            let sendToDevice = NSMenuItem(title: "Send Clipboard to \(peer.name)", action: #selector(sendClipboardToPeer(_:)), keyEquivalent: "")
-            sendToDevice.target = self
-            sendToDevice.representedObject = peer.id
-            sendToDevice.isEnabled = peer.connected
-            details.addItem(sendToDevice)
-        }
+        status.isEnabled = false
+        details.addItem(status)
+
+        let routeTitle = peer.endpoint.host == "unknown" ? "Route Unknown" : "Route: \(peer.endpoint.host):\(peer.endpoint.port)"
+        let route = NSMenuItem(title: routeTitle, action: nil, keyEquivalent: "")
+        route.isEnabled = false
+        route.isAlternate = true
+        route.keyEquivalentModifierMask = .option
+        details.addItem(route)
+
         details.addItem(.separator())
-        let rename = NSMenuItem(title: peer.id == transport.localDeviceID ? "Rename This Mac…" : "Rename Device…", action: #selector(renameDevice(_:)), keyEquivalent: "")
-        rename.target = self; rename.representedObject = peer.id; details.addItem(rename)
+        let sendToDevice = NSMenuItem(title: "Send Clipboard to \(peer.name)", action: #selector(sendClipboardToPeer(_:)), keyEquivalent: "")
+        sendToDevice.target = self
+        sendToDevice.representedObject = peer.id
+        sendToDevice.isEnabled = peer.connected
+        details.addItem(sendToDevice)
         details.addItem(.separator())
-        let remove = NSMenuItem(title: peer.id == transport.localDeviceID ? "Unpair All Devices…" : "Unpair Device…", action: #selector(removePeer(_:)), keyEquivalent: "")
-        remove.target = self; remove.representedObject = peer.id; details.addItem(remove)
+        let rename = NSMenuItem(title: "Rename Device…", action: #selector(renameDevice(_:)), keyEquivalent: "")
+        rename.target = self
+        rename.representedObject = peer.id
+        details.addItem(rename)
+        let remove = NSMenuItem(title: "Unpair Device…", action: #selector(removePeer(_:)), keyEquivalent: "")
+        remove.target = self
+        remove.representedObject = peer.id
+        details.addItem(remove)
         return details
     }
 
@@ -347,8 +401,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     @objc private func resetPairingKey() {
         let alert = NSAlert()
-        alert.messageText = "Generate a New Pairing Key?"
-        alert.informativeText = "This rotates the 256-bit PSK, clears the paired device list, and generates a fresh pairing code. Existing paired devices must re-pair."
+        alert.messageText = "Generate a New Pairing Code?"
+        alert.informativeText = "This creates a new pairing code and clears paired phones. Every phone must scan the QR again."
         alert.addButton(withTitle: "Generate")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -434,11 +488,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         return nil
     }
 
-    @objc private func sendCurrentClipboard() {
-        clipboard.sendCurrentClipboard()
-        ToastHUD.shared.show(message: "Sent clipboard", icon: "doc.on.clipboard.fill")
-    }
-
     @objc private func sendBrowserTabToTarget(_ sender: NSMenuItem) {
         guard let dict = sender.representedObject as? [String: Any?],
               let url = dict["url"] as? URL else { return }
@@ -462,10 +511,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
                 ToastHUD.shared.show(message: "Sent clipboard to \(peerName)", icon: "doc.on.clipboard.fill")
             }
         case .image(let image):
-            transport.sendImage(image)
+            transport.sendImage(image, targetDeviceId: peerID)
             ToastHUD.shared.show(message: "Sent image to \(peerName)", icon: "photo.fill")
         case .unsupported:
-            break
+            ToastHUD.shared.show(message: "Nothing to send", icon: "exclamationmark.circle")
         }
     }
 
@@ -492,22 +541,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
     }
 
+    @objc private func unpairAllDevices() {
+        let alert = NSAlert()
+        alert.messageText = "Unpair All Devices?"
+        alert.informativeText = "This Mac will stop syncing with every paired phone. You can add them again with a new QR at any time."
+        alert.addButton(withTitle: "Unpair")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { transport.unpairAll() }
+    }
+
     @objc private func removePeer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        let name = id == transport.localDeviceID ? transport.localDeviceName : peers.first(where: { $0.id == id })?.name
+        let name = peers.first(where: { $0.id == id })?.name
         guard let name else { return }
-        if id == transport.localDeviceID {
-            let alert = NSAlert()
-            alert.messageText = "Unpair All Devices?"
-            alert.informativeText = "This clears all paired devices and saved keys. You can generate a fresh pairing code at any time."
-            alert.addButton(withTitle: "Unpair")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() == .alertFirstButtonReturn { transport.unpairAll() }
-            return
-        }
         let alert = NSAlert()
         alert.messageText = "Unpair \(name)?"
-        alert.informativeText = "This device will no longer sync clipboard text or images with this Mac."
+        alert.informativeText = "This phone will no longer sync clipboard text or images with this Mac."
         alert.addButton(withTitle: "Unpair")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn { transport.removePeer(id) }

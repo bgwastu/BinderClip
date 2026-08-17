@@ -89,12 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         }
 
         clipboard.onLocalText = { [weak transport] text in
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-                transport?.sendOpenURL(url)
-            } else {
-                transport?.sendClipboard(text)
-            }
+            transport?.sendClipboard(text)
         }
         clipboard.onLocalImage = { [weak transport] image in
             transport?.sendImage(image)
@@ -515,14 +510,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let peerName = peers.first(where: { $0.id == peerID })?.name ?? "device"
         switch ClipboardClassifier.read(from: NSPasteboard.general) {
         case .text(let text):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-                transport.sendOpenURL(url, targetDeviceId: peerID)
-                ToastHUD.shared.show(message: "Sent URL to \(peerName)", icon: "safari.fill")
-            } else {
-                transport.sendClipboard(text, targetDeviceId: peerID)
-                ToastHUD.shared.show(message: "Sent clipboard to \(peerName)", icon: "doc.on.clipboard.fill")
-            }
+            transport.sendClipboard(text, targetDeviceId: peerID)
+            ToastHUD.shared.show(message: "Sent clipboard to \(peerName)", icon: "doc.on.clipboard.fill")
         case .image(let image):
             transport.sendImage(image, targetDeviceId: peerID)
             ToastHUD.shared.show(message: "Sent image to \(peerName)", icon: "photo.fill")

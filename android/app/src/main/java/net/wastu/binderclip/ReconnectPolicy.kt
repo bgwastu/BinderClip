@@ -39,6 +39,8 @@ class ReconnectPolicy(
         delaySeconds = 1L
     }
 
+    fun shouldAnnounceUnreachable(): Boolean = delaySeconds >= 8L
+
     fun nextBackoffSeconds(): Long {
         val current = delaySeconds
         delaySeconds = (delaySeconds * 2).coerceAtMost(maxDelaySeconds)

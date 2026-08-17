@@ -23,7 +23,11 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func closeWithSuccess() {
@@ -92,6 +96,8 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 348, height: 470), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "BinderClip"
         panel.level = .floating
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.contentView = stack
         panel.delegate = self
         window = panel
@@ -140,12 +146,14 @@ final class PairingWindow: NSObject, NSWindowDelegate {
         filter.setValue("M", forKey: "inputCorrectionLevel")
         guard let output = filter.outputImage else { return nil }
         let extent = output.extent
+        guard extent.width > 0, extent.height > 0, extent.width.isFinite, extent.height.isFinite else { return nil }
         let target: CGFloat = 272
         let scale = max(1, floor(min(target / extent.width, target / extent.height)))
         let scaled = output.transformed(by: .init(scaleX: scale, y: scale))
-        let representation = NSCIImageRep(ciImage: scaled)
-        let image = NSImage(size: representation.size)
-        image.addRepresentation(representation)
-        return image
+        let scaledExtent = scaled.extent
+        guard scaledExtent.width > 0, scaledExtent.height > 0 else { return nil }
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        guard let cgImage = context.createCGImage(scaled, from: scaledExtent) else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 }

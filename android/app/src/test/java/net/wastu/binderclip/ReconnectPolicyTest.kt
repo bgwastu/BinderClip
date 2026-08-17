@@ -45,6 +45,16 @@ class ReconnectPolicyTest {
     }
 
     @Test
+    fun unreachableAnnouncementWaitsForSettledBackoff() {
+        val policy = ReconnectPolicy()
+        assertFalse(policy.shouldAnnounceUnreachable())
+        repeat(2) { policy.nextBackoffSeconds() }
+        assertFalse(policy.shouldAnnounceUnreachable())
+        policy.nextBackoffSeconds()
+        assertTrue(policy.shouldAnnounceUnreachable())
+    }
+
+    @Test
     fun phaseDerivation() {
         assertEquals(ConnectionPhase.NotPaired, ConnectionStatus.phase(false, false, false))
         assertEquals(ConnectionPhase.Connected, ConnectionStatus.phase(true, true, false))

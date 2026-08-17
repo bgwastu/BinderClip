@@ -101,10 +101,12 @@ class BinderClipService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
+                    client.setInteractive(true)
                     if (automaticClipboardEnabled) startRootPolling()
                     if (!client.isConnected()) requestConnectResettingBackoff("screen_on")
                 }
                 Intent.ACTION_SCREEN_OFF -> {
+                    client.setInteractive(false)
                     stopRootPolling()
                 }
             }
@@ -136,8 +138,10 @@ class BinderClipService : Service() {
                 publishState()
             },
             onRosterChanged = { publishState() },
-            onDisconnected = { publishState() }
+            onDisconnected = { publishState() },
         )
+        val power = getSystemService(PowerManager::class.java)
+        client.setInteractive(power?.isInteractive != false)
 
         clipboard.addPrimaryClipChangedListener {
             if (uiVisible) executor.execute(::sendCurrentClipboard)
@@ -261,6 +265,7 @@ class BinderClipService : Service() {
                         store.peer = null
                         store.groupKey = null
                         store.peerCandidates = emptyList()
+                        store.lastGoodEndpoint = null
                         client.close()
                     }
                     publishState()
@@ -637,30 +642,32 @@ class BinderClipService : Service() {
     private fun registerNetworkCallback() {
         val connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
 
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                networkDebounceFuture?.cancel(false)
-                networkDebounceFuture = reconnectExecutor.schedule({
-                    if (!client.isConnected()) {
-                        requestConnectResettingBackoff("network_available")
-                    }
-                }, 1, TimeUnit.SECONDS)
+                scheduleNetworkReconnect("network_available")
             }
 
             override fun onLost(network: Network) {
-                networkDebounceFuture?.cancel(false)
-                networkDebounceFuture = reconnectExecutor.schedule({
-                    if (!client.isConnected()) {
-                        requestConnectResettingBackoff("network_lost")
-                    }
-                }, 1, TimeUnit.SECONDS)
+                scheduleNetworkReconnect("network_lost")
             }
         }
         networkCallback = cb
         connectivity.registerNetworkCallback(request, cb)
+    }
+
+    private fun scheduleNetworkReconnect(reason: String) {
+        networkDebounceFuture?.cancel(false)
+        networkDebounceFuture = reconnectExecutor.schedule({
+            if (!client.isConnected()) {
+                requestConnectResettingBackoff(reason)
+            }
+        }, 2, TimeUnit.SECONDS)
     }
 
     private fun unregisterNetworkCallback() {

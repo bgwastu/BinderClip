@@ -2,6 +2,7 @@ import Foundation
 
 enum SessionLiveness {
     static let heartbeatBudget: TimeInterval = 5
+    static let heartbeatSleepBudget: TimeInterval = 45
 
     static func ipv4Bytes(_ ip: String) -> [UInt8]? {
         let parts = ip.split(separator: ".")

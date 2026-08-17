@@ -26,6 +26,9 @@ public final class WebSocketServer: @unchecked Sendable {
     private var addressSampler: DispatchSourceTimer?
     private var addressDebounce: DispatchWorkItem?
     private var heartbeatTimer: DispatchSourceTimer?
+    private var wantsListener = false
+    private var listenBackoffSeconds: TimeInterval = 1
+    private var listenRestart: DispatchWorkItem?
 
     private var activeSessions: [ObjectIdentifier: WebSocketSession] = [:]
     private var lastProcessedHash: String = ""
@@ -83,6 +86,8 @@ public final class WebSocketServer: @unchecked Sendable {
             self.rosterManager.markAllDisconnected()
             self.updateCachedState()
             self.publishPeers()
+            self.wantsListener = true
+            self.listenBackoffSeconds = 1
             self.startListener()
             self.startPathMonitor()
             self.startAddressWatch()
@@ -93,6 +98,9 @@ public final class WebSocketServer: @unchecked Sendable {
     public func stop() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.wantsListener = false
+            self.listenRestart?.cancel()
+            self.listenRestart = nil
             self.pathDebounce?.cancel()
             self.pathDebounce = nil
             self.pathMonitor?.cancel()
@@ -222,6 +230,7 @@ public final class WebSocketServer: @unchecked Sendable {
     }
 
     private func startListener() {
+        guard wantsListener, listener == nil else { return }
         do {
             let tcpOptions = NWProtocolTCP.Options()
             tcpOptions.enableKeepalive = true
@@ -248,6 +257,7 @@ public final class WebSocketServer: @unchecked Sendable {
                 guard let self else { return }
                 switch state {
                 case .ready:
+                    self.listenBackoffSeconds = 1
                     self.onLog?("Listening on port \(SyncProtocol.defaultPort)")
                     self.onLocalNetworkPermissionRequired?(false)
                 case .failed(let error):
@@ -255,6 +265,11 @@ public final class WebSocketServer: @unchecked Sendable {
                     if case .posix(let code) = error, code == POSIXErrorCode.EPERM {
                         self.onLocalNetworkPermissionRequired?(true)
                     }
+                    guard self.listener != nil else { return }
+                    let failed = self.listener
+                    self.listener = nil
+                    failed?.cancel()
+                    self.scheduleListenerRestart()
                 default:
                     break
                 }
@@ -268,7 +283,21 @@ public final class WebSocketServer: @unchecked Sendable {
             self.listener = listener
         } catch {
             onLog?("Could not start listener: \(error.localizedDescription)")
+            scheduleListenerRestart()
         }
+    }
+
+    private func scheduleListenerRestart() {
+        guard wantsListener else { return }
+        listenRestart?.cancel()
+        let delay = listenBackoffSeconds
+        listenBackoffSeconds = min(listenBackoffSeconds * 2, SyncProtocol.listenerBackoffCap)
+        let work = DispatchWorkItem { [weak self] in
+            self?.startListener()
+        }
+        listenRestart = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
+        onLog?("Retrying listener in \(Int(delay))s")
     }
 
     private func acceptIncoming(_ nwConnection: NWConnection) {
@@ -285,6 +314,7 @@ public final class WebSocketServer: @unchecked Sendable {
             switch state {
             case .ready:
                 self.bindSession(session)
+                self.scheduleAuthDeadline(session)
                 self.readNextMessage(from: session)
                 self.publishPresence()
             case .waiting:
@@ -305,8 +335,23 @@ public final class WebSocketServer: @unchecked Sendable {
     private func handleConnectionClosed(session: WebSocketSession) {
         let id = ObjectIdentifier(session.connection)
         guard activeSessions.removeValue(forKey: id) != nil else { return }
+        session.authDeadline?.cancel()
+        session.authDeadline = nil
         session.connection.cancel()
         publishPresence()
+    }
+
+    private func scheduleAuthDeadline(_ session: WebSocketSession) {
+        session.authDeadline?.cancel()
+        let work = DispatchWorkItem { [weak self, weak session] in
+            guard let self, let session else { return }
+            let id = ObjectIdentifier(session.connection)
+            guard self.activeSessions[id] === session, !session.isAuthenticated else { return }
+            self.onLog?("Auth deadline exceeded")
+            session.connection.cancel()
+        }
+        session.authDeadline = work
+        queue.asyncAfter(deadline: .now() + SyncProtocol.authDeadline, execute: work)
     }
 
     private func usableAuthenticatedPeerIDs() -> [String] {
@@ -318,7 +363,8 @@ public final class WebSocketServer: @unchecked Sendable {
                 boundLocal: session.boundLocalAddress,
                 currentLocals: locals,
                 lastHeard: session.lastHeard,
-                now: now
+                now: now,
+                budget: session.livenessBudget
             ) else { return nil }
             if case .ready = session.connection.state { return peerID }
             return nil
@@ -400,6 +446,10 @@ public final class WebSocketServer: @unchecked Sendable {
         case "pong":
             break
 
+        case "power":
+            guard session.isAuthenticated else { return }
+            applyPowerState(json["state"] as? String, session: session)
+
         default:
             break
         }
@@ -427,12 +477,26 @@ public final class WebSocketServer: @unchecked Sendable {
             return
         }
 
+        let incomingID = ObjectIdentifier(session.connection)
+        guard PeerPresence.shouldProcessAuth(
+            isStillActive: activeSessions[incomingID] === session,
+            alreadyAuthenticated: session.isAuthenticated
+        ) else { return }
+
+        session.authDeadline?.cancel()
+        session.authDeadline = nil
         session.isAuthenticated = true
         session.peerID = clientID
         session.peerName = clientName
+        session.livenessBudget = SyncProtocol.heartbeatBudget
 
-        let keepID = ObjectIdentifier(session.connection)
-        for (id, other) in activeSessions where id != keepID && PeerPresence.shouldReplace(existingPeerID: other.peerID, incomingPeerID: clientID) {
+        for (id, other) in activeSessions where id != incomingID && PeerPresence.shouldCancelExtra(
+            isAuthenticated: other.isAuthenticated,
+            existingPeerID: other.peerID,
+            incomingPeerID: clientID
+        ) {
+            other.authDeadline?.cancel()
+            other.authDeadline = nil
             other.connection.cancel()
             activeSessions.removeValue(forKey: id)
         }
@@ -515,11 +579,8 @@ public final class WebSocketServer: @unchecked Sendable {
         let regained = satisfied && !lastPathSatisfied
         lastPathSatisfied = satisfied
         if !satisfied {
-            for session in activeSessions.values {
-                session.connection.cancel()
-            }
-            publishPresence()
-            onLog?("Network unavailable")
+            refreshAddresses(reason: "path-unsatisfied")
+            onLog?("Default path unsatisfied")
             return
         }
         if regained {
@@ -630,7 +691,8 @@ public final class WebSocketServer: @unchecked Sendable {
                 boundLocal: session.boundLocalAddress,
                 currentLocals: locals,
                 lastHeard: session.lastHeard,
-                now: now
+                now: now,
+                budget: session.livenessBudget
             ) {
                 session.connection.cancel()
                 evicted = true
@@ -643,6 +705,17 @@ public final class WebSocketServer: @unchecked Sendable {
         }
         if evicted {
             publishPresence()
+        }
+    }
+
+    private func applyPowerState(_ state: String?, session: WebSocketSession) {
+        switch state {
+        case "sleep":
+            session.livenessBudget = SyncProtocol.heartbeatSleepBudget
+        case "awake":
+            session.livenessBudget = SyncProtocol.heartbeatBudget
+        default:
+            break
         }
     }
 
@@ -710,6 +783,8 @@ private final class WebSocketSession: @unchecked Sendable {
     var peerName: String?
     var boundLocalAddress: String?
     var lastHeard: Date?
+    var livenessBudget: TimeInterval = SyncProtocol.heartbeatBudget
+    var authDeadline: DispatchWorkItem?
 
     init(connection: NWConnection) {
         self.connection = connection

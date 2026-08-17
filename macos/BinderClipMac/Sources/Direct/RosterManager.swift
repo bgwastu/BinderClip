@@ -42,13 +42,16 @@ public struct Peer: Codable, Hashable, Identifiable, Sendable {
 final class PrivateStateStore: @unchecked Sendable {
     private let file: URL
 
-    init() {
-        let manager = FileManager.default
-        let root = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    static func applicationSupportDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("net.wastu.binderclip", isDirectory: true)
-        try? manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
-        file = root.appendingPathComponent("direct-secrets.json")
+    }
+
+    init(directory: URL = applicationSupportDirectory()) {
+        let manager = FileManager.default
+        try? manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        file = directory.appendingPathComponent("direct-secrets.json")
     }
 
     func data(account: String) -> Data? {
@@ -75,25 +78,28 @@ final class PrivateStateStore: @unchecked Sendable {
 
 /// Manages identity, peer roster, and the shared pairing key.
 final class RosterManager: @unchecked Sendable {
-    private let secureStore = PrivateStateStore()
+    private let secureStore: PrivateStateStore
+    private let defaults: UserDefaults
     private(set) var localID: String
     private(set) var localName: String
     private(set) var groupKey: Data
     private(set) var peers: [String: Peer] = [:]
 
-    init() {
-        if let savedName = UserDefaults.standard.string(forKey: "device.custom_name")?.trimmingCharacters(in: .whitespacesAndNewlines),
+    init(stateDirectory: URL = PrivateStateStore.applicationSupportDirectory(), defaults: UserDefaults = .standard) {
+        self.secureStore = PrivateStateStore(directory: stateDirectory)
+        self.defaults = defaults
+        if let savedName = defaults.string(forKey: "device.custom_name")?.trimmingCharacters(in: .whitespacesAndNewlines),
            !savedName.isEmpty {
             self.localName = savedName
         } else {
             self.localName = Host.current().localizedName ?? "Mac"
         }
 
-        if let savedID = UserDefaults.standard.string(forKey: "device.id"), !savedID.isEmpty {
+        if let savedID = defaults.string(forKey: "device.id"), !savedID.isEmpty {
             self.localID = savedID
         } else {
             let id = UUID().uuidString
-            UserDefaults.standard.set(id, forKey: "device.id")
+            defaults.set(id, forKey: "device.id")
             self.localID = id
         }
 
@@ -107,8 +113,8 @@ final class RosterManager: @unchecked Sendable {
 
         loadPeers()
         markAllDisconnected()
-        UserDefaults.standard.removeObject(forKey: "host-target")
-        UserDefaults.standard.removeObject(forKey: "tombstoned-peers")
+        defaults.removeObject(forKey: "host-target")
+        defaults.removeObject(forKey: "tombstoned-peers")
     }
 
     func setLocalName(_ name: String) -> String {
@@ -116,9 +122,9 @@ final class RosterManager: @unchecked Sendable {
         let updated = trimmed.isEmpty ? (Host.current().localizedName ?? "Mac") : trimmed
         self.localName = updated
         if trimmed.isEmpty {
-            UserDefaults.standard.removeObject(forKey: "device.custom_name")
+            defaults.removeObject(forKey: "device.custom_name")
         } else {
-            UserDefaults.standard.set(trimmed, forKey: "device.custom_name")
+            defaults.set(trimmed, forKey: "device.custom_name")
         }
         return updated
     }
@@ -186,7 +192,7 @@ final class RosterManager: @unchecked Sendable {
     }
 
     private func loadPeers() {
-        guard let data = UserDefaults.standard.data(forKey: "peers"),
+        guard let data = defaults.data(forKey: "peers"),
               let saved = try? JSONDecoder().decode([Peer].self, from: data) else { return }
         peers = Dictionary(uniqueKeysWithValues: saved.map { ($0.id, $0) })
     }
@@ -195,6 +201,6 @@ final class RosterManager: @unchecked Sendable {
         let stored = Array(peers.values).map { peer in
             Peer(id: peer.id, name: peer.name, endpoint: peer.endpoint, connected: false, platform: peer.platform)
         }
-        UserDefaults.standard.set(try? JSONEncoder().encode(stored), forKey: "peers")
+        defaults.set(try? JSONEncoder().encode(stored), forKey: "peers")
     }
 }

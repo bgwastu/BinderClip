@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private let statusMenu = NSMenu()
     private var isStatusMenuOpen = false
     private var menuNeedsRebuild = false
+    private var pendingMenuAction: (() -> Void)?
 
     private func scheduleStateRefresh() {
         let apply = { [weak self] in
@@ -132,11 +133,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
 
     func menuDidClose(_ menu: NSMenu) {
         isStatusMenuOpen = false
+        let pending = pendingMenuAction
+        pendingMenuAction = nil
         if menuNeedsRebuild {
             menuNeedsRebuild = false
             renderMenu()
             updateStatusIcon()
         }
+        if let pending {
+            DispatchQueue.main.async(execute: pending)
+        }
+    }
+
+    private func runAfterMenuCloses(_ action: @escaping () -> Void) {
+        if isStatusMenuOpen {
+            pendingMenuAction = action
+            return
+        }
+        DispatchQueue.main.async(execute: action)
     }
 
     private func notifyIncoming(title: String, body: String) {
@@ -365,13 +379,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         let status = NSMenuItem(title: peer.connected ? "Connected" : "Waiting for device", action: nil, keyEquivalent: "")
         status.isEnabled = false
         details.addItem(status)
-
-        let routeTitle = peer.endpoint.host == "unknown" ? "Route Unknown" : "Route: \(peer.endpoint.host):\(peer.endpoint.port)"
-        let route = NSMenuItem(title: routeTitle, action: nil, keyEquivalent: "")
-        route.isEnabled = false
-        route.isAlternate = true
-        route.keyEquivalentModifierMask = .option
-        details.addItem(route)
+        let host = peer.endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !host.isEmpty, host != "unknown" {
+            let ip = NSMenuItem(title: host, action: nil, keyEquivalent: "")
+            ip.isEnabled = false
+            details.addItem(ip)
+        }
 
         details.addItem(.separator())
         let sendToDevice = NSMenuItem(title: "Send Clipboard to \(peer.name)", action: #selector(sendClipboardToPeer(_:)), keyEquivalent: "")
@@ -392,7 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     }
 
     @objc private func showPairing() {
-        DispatchQueue.main.async { [weak self] in
+        runAfterMenuCloses { [weak self] in
             guard let self else { return }
             self.peerIdsBeforePairing = Set(self.peers.filter(\.connected).map(\.id))
             self.pairing.show(statusText: "Waiting for device…") { [weak self] in self?.transport.createInvite() }

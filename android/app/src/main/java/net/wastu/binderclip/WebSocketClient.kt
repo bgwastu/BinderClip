@@ -32,12 +32,11 @@ class WebSocketClient(
 ) {
     companion object {
         private const val TAG = "BinderClipWS"
-        private const val CONNECT_TIMEOUT_SECONDS = 4L
     }
 
     private val httpClient = OkHttpClient.Builder()
         .pingInterval(15, TimeUnit.SECONDS)
-        .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .connectTimeout(SyncProtocol.CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false)
         .build()
@@ -54,12 +53,20 @@ class WebSocketClient(
     @Volatile private var generation = 0
     private val openedWithoutAuth = AtomicInteger(0)
     private val reportedFailure = AtomicBoolean(false)
+    private val raceAuthClaimed = AtomicBoolean(false)
     private val policy = ReconnectPolicy()
     @Volatile private var lastHeardMs = 0L
     private var heartbeatWatch: ScheduledFuture<*>? = null
+    @Volatile private var interactive = true
 
     fun isConnected(): Boolean = isConnected.get()
     fun isConnecting(): Boolean = isConnecting.get()
+
+    fun setInteractive(value: Boolean) {
+        if (interactive == value) return
+        interactive = value
+        executor.execute { sendPowerLocked() }
+    }
 
     fun pair(uriString: String) {
         val info = SyncProtocol.parsePairingUrl(uriString)
@@ -73,6 +80,9 @@ class WebSocketClient(
 
         store.groupKey = pskBytes
         store.peerCandidates = info.endpoints
+        if (store.lastGoodEndpoint !in info.endpoints) {
+            store.lastGoodEndpoint = null
+        }
 
         val parsed = info.endpoints.firstNotNullOfOrNull { SyncProtocol.parseEndpoint(it) }
         val host = parsed?.first ?: "unknown"
@@ -130,6 +140,7 @@ class WebSocketClient(
         isConnecting.set(true)
         openedWithoutAuth.set(0)
         reportedFailure.set(false)
+        raceAuthClaimed.set(false)
         onDisconnected()
         onStatus("Connecting…")
 
@@ -137,7 +148,7 @@ class WebSocketClient(
         val localId = store.deviceId
         val localName = deviceNameProvider()
 
-        for (rawEndpoint in endpoints) {
+        for (rawEndpoint in ConnectRace.combinations(endpoints)) {
             val parsed = SyncProtocol.parseEndpoint(rawEndpoint) ?: continue
             val endpoint = "${parsed.first}:${parsed.second}"
             val url = "ws://$endpoint/"
@@ -150,6 +161,17 @@ class WebSocketClient(
                     if (myGeneration != generation) {
                         webSocket.cancel()
                         return
+                    }
+                    if (!raceAuthClaimed.compareAndSet(false, true)) {
+                        Log.d(TAG, "Losing connect race at $endpoint")
+                        candidateSockets.remove(endpoint)
+                        webSocket.cancel()
+                        return
+                    }
+                    for (ep in candidateSockets.keys.toList()) {
+                        if (ep != endpoint) {
+                            candidateSockets.remove(ep)?.cancel()
+                        }
                     }
                     openedWithoutAuth.incrementAndGet()
                     Log.d(TAG, "Socket opened to $endpoint, sending auth")
@@ -205,18 +227,19 @@ class WebSocketClient(
             closeCandidateSockets()
             reportConnectFailure(endpoints)
             scheduleReconnectBackoff()
-        }, CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        }, SyncProtocol.CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
     }
 
     private fun reportConnectFailure(endpoints: List<String>) {
         if (!reportedFailure.compareAndSet(false, true)) return
-        val hosts = endpoints.mapNotNull { SyncProtocol.parseEndpoint(it)?.first }.distinct()
-        val message = if (openedWithoutAuth.get() > 0) {
-            "Pairing key rejected. Scan a fresh QR from the Mac."
-        } else {
-            "Could not reach Mac at ${hosts.joinToString(", ")}. Same Wi-Fi?"
+        onStatus("Reconnecting…")
+        if (openedWithoutAuth.get() > 0) {
+            onFailure("Pairing key rejected. Scan a fresh QR from the Mac.")
+            return
         }
-        onFailure(message)
+        if (!policy.shouldAnnounceUnreachable()) return
+        val hosts = endpoints.mapNotNull { SyncProtocol.parseEndpoint(it)?.first }.distinct()
+        onFailure("Could not reach Mac at ${hosts.joinToString(", ")}. Same Wi-Fi?")
     }
 
     private fun handleTextMessage(webSocket: WebSocket, endpoint: String, text: String, myGeneration: Int) {
@@ -262,12 +285,14 @@ class WebSocketClient(
                 )
                 store.peer = updatedPeer
                 store.upsertMembers(listOf(updatedPeer))
+                store.lastGoodEndpoint = endpoint
                 applyRemoteEndpoints(SyncProtocol.endpointsFromJson(json))
 
                 onPeerIdentity(remoteId, remoteName)
                 onRosterChanged(store.members)
                 onStatus(remoteName.ifBlank { "Connected" })
                 DiagnosticLog.info("Connected to $remoteName via $endpoint")
+                sendPowerLocked()
                 startHeartbeatWatch()
             }
 
@@ -345,7 +370,7 @@ class WebSocketClient(
             onRosterChanged(store.members)
             onDisconnected()
             onStatus("Reconnecting…")
-            scheduleReconnectBackoff(reset = resetBackoff)
+            scheduleReconnectBackoff(reset = resetBackoff, immediate = resetBackoff)
         } else if (!isConnected.get() && candidateSockets.isEmpty() && isConnecting.get()) {
             isConnecting.set(false)
             reportConnectFailure(getEndpoints())
@@ -412,12 +437,11 @@ class WebSocketClient(
         reconnectTask = null
     }
 
-    private fun scheduleReconnectBackoff(reset: Boolean = false) {
+    private fun scheduleReconnectBackoff(reset: Boolean = false, immediate: Boolean = false) {
         if (store.groupKey == null) return
         cancelPendingReconnect()
         if (reset) policy.resetBackoff()
-
-        val delay = policy.nextBackoffSeconds()
+        val delay = if (immediate) 0L else policy.nextBackoffSeconds()
         reconnectTask = executor.schedule({
             requestConnect(force = false, resetBackoff = false)
         }, delay, TimeUnit.SECONDS)
@@ -432,7 +456,7 @@ class WebSocketClient(
         noteActivity()
         heartbeatWatch = executor.scheduleWithFixedDelay({
             if (!isConnected.get()) return@scheduleWithFixedDelay
-            if (SessionLiveness.isAlive(null, emptyList(), lastHeardMs, System.currentTimeMillis())) {
+            if (SessionLiveness.isAlive(null, emptyList(), lastHeardMs, System.currentTimeMillis(), livenessBudgetMs())) {
                 return@scheduleWithFixedDelay
             }
             val socket = activeSocket ?: return@scheduleWithFixedDelay
@@ -454,14 +478,21 @@ class WebSocketClient(
     }
 
     private fun getEndpoints(): List<String> {
-        val candidates = store.peerCandidates.toMutableList()
         val peer = store.peer
-        if (peer != null && peer.host.isNotBlank() && peer.host != "unknown") {
-            val peerEp = "${peer.host}:${peer.port}"
-            if (!candidates.contains(peerEp)) {
-                candidates.add(peerEp)
-            }
+        val remembered = if (peer != null && peer.host.isNotBlank() && peer.host != "unknown") {
+            "${peer.host}:${peer.port}"
+        } else {
+            null
         }
-        return candidates.distinct().filter { it.isNotBlank() }
+        return SyncProtocol.orderedConnectEndpoints(store.lastGoodEndpoint, store.peerCandidates, remembered)
+    }
+
+    private fun livenessBudgetMs(): Long =
+        if (interactive) SyncProtocol.HEARTBEAT_BUDGET_MS else SyncProtocol.HEARTBEAT_SLEEP_BUDGET_MS
+
+    private fun sendPowerLocked() {
+        val socket = activeSocket ?: return
+        val state = if (interactive) "awake" else "sleep"
+        socket.send("""{"type":"power","state":"$state"}""")
     }
 }

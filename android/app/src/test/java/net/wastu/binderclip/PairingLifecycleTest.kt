@@ -63,4 +63,17 @@ class PairingLifecycleTest {
         assertEquals("192.168.1.50:39421", unique[0])
         assertEquals("100.64.0.1:39421", unique[1])
     }
+
+    @Test
+    fun orderedConnectEndpointsPutsLastGoodFirst() {
+        val ordered = SyncProtocol.orderedConnectEndpoints(
+            lastGood = "100.96.0.2:39421",
+            candidates = listOf("192.168.50.168:39421", "100.96.0.2:39421"),
+            remembered = "192.168.1.5:39421",
+        )
+        assertEquals(
+            listOf("100.96.0.2:39421", "192.168.50.168:39421", "192.168.1.5:39421"),
+            ordered,
+        )
+    }
 }

@@ -43,6 +43,9 @@ public enum SyncProtocol {
     public static let maximumAdvertisedEndpoints = 4
     public static let heartbeatInterval: TimeInterval = 2
     public static let heartbeatBudget: TimeInterval = SessionLiveness.heartbeatBudget
+    public static let heartbeatSleepBudget: TimeInterval = SessionLiveness.heartbeatSleepBudget
+    public static let authDeadline: TimeInterval = 2
+    public static let listenerBackoffCap: TimeInterval = 16
 
     public static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

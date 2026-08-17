@@ -24,7 +24,11 @@ final class PairingLifecycleTests: XCTestCase {
     }
 
     func testUnpairThenSameDeviceCanBeAddedAgain() {
-        let manager = RosterManager()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("binderclip-pairing-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let defaults = UserDefaults(suiteName: "binderclip-pairing-\(UUID().uuidString)")!
+        let manager = RosterManager(stateDirectory: directory, defaults: defaults)
         manager.clearPairingState()
         let peer = Peer(id: "device-aaa", name: "Pixel 8", endpoint: DirectEndpoint(host: "192.168.1.100", port: 39421), connected: true, platform: "Android")
         XCTAssertTrue(manager.addOrUpdatePeer(peer))

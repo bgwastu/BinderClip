@@ -102,6 +102,14 @@ class DeviceStore(context: Context) {
             }.getOrDefault(emptyList())
         } ?: emptyList()
         set(value) = prefs.edit().putString("peer_candidates", JSONArray(value).toString()).apply()
+
+    var lastGoodEndpoint: String?
+        get() = prefs.getString("last_good_endpoint", null)?.takeIf { it.isNotBlank() }
+        set(value) = prefs.edit().apply {
+            val trimmed = value?.trim()
+            if (trimmed.isNullOrBlank()) remove("last_good_endpoint")
+            else putString("last_good_endpoint", trimmed)
+        }.apply()
     var members: List<RememberedPeer>
         get() = runCatching {
             val raw = prefs.getString("members", "[]") ?: "[]"
@@ -143,6 +151,7 @@ class DeviceStore(context: Context) {
         groupKey = key
         peer = null
         peerCandidates = emptyList()
+        lastGoodEndpoint = null
         members = emptyList()
     }
 
@@ -151,6 +160,7 @@ class DeviceStore(context: Context) {
         groupKey = null
         peer = null
         peerCandidates = emptyList()
+        lastGoodEndpoint = null
         members = emptyList()
     }
     var pendingText: String?

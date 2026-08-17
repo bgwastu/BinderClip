@@ -31,6 +31,25 @@ object SyncProtocol {
     const val MAXIMUM_IMAGE_BYTES = 32 * 1024 * 1024
     const val HEARTBEAT_INTERVAL_MS = 2_000L
     const val HEARTBEAT_BUDGET_MS = 5_000L
+    const val HEARTBEAT_SLEEP_BUDGET_MS = 45_000L
+    const val AUTH_DEADLINE_MS = 2_000L
+    const val CONNECT_TIMEOUT_SECONDS = 8L
+
+    fun orderedConnectEndpoints(
+        lastGood: String?,
+        candidates: List<String>,
+        remembered: String? = null,
+    ): List<String> {
+        val out = ArrayList<String>()
+        fun add(raw: String?) {
+            val value = raw?.trim()?.takeIf { it.isNotBlank() } ?: return
+            if (value !in out) out.add(value)
+        }
+        add(lastGood)
+        candidates.forEach(::add)
+        add(remembered)
+        return out
+    }
 
     fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)

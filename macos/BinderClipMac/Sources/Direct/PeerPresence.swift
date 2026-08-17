@@ -22,4 +22,9 @@ enum PeerPresence {
     static func shouldProcessAuth(isStillActive: Bool, alreadyAuthenticated: Bool) -> Bool {
         isStillActive && !alreadyAuthenticated
     }
+
+    /// An unpaired phone may return only by scanning the QR (`pairing` on auth).
+    static func shouldAcceptReturningPeer(wasUnpaired: Bool, isPairingScan: Bool) -> Bool {
+        !wasUnpaired || isPairingScan
+    }
 }

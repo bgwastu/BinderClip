@@ -27,4 +27,10 @@ final class PeerPresenceTests: XCTestCase {
         XCTAssertFalse(PeerPresence.shouldProcessAuth(isStillActive: false, alreadyAuthenticated: false))
         XCTAssertFalse(PeerPresence.shouldProcessAuth(isStillActive: true, alreadyAuthenticated: true))
     }
+
+    func testUnpairedPeerReturnsOnlyViaPairingScan() {
+        XCTAssertTrue(PeerPresence.shouldAcceptReturningPeer(wasUnpaired: false, isPairingScan: false))
+        XCTAssertFalse(PeerPresence.shouldAcceptReturningPeer(wasUnpaired: true, isPairingScan: false))
+        XCTAssertTrue(PeerPresence.shouldAcceptReturningPeer(wasUnpaired: true, isPairingScan: true))
+    }
 }

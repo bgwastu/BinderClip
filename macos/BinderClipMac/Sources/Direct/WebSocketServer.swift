@@ -123,11 +123,9 @@ public final class WebSocketServer: @unchecked Sendable {
     public func resetPairingKey() {
         queue.async { [weak self] in
             guard let self else { return }
+            let sessions = Array(self.activeSessions.values)
+            self.notifyUnpairAndDrop(sessions)
             _ = self.rosterManager.rotateGroupKey()
-            for session in self.activeSessions.values {
-                session.connection.cancel()
-            }
-            self.activeSessions.removeAll()
             self.updateCachedState()
             self.publishPeers()
             self.onLog?("New pairing key generated")
@@ -137,11 +135,9 @@ public final class WebSocketServer: @unchecked Sendable {
     public func unpairAll() {
         queue.async { [weak self] in
             guard let self else { return }
-            self.rosterManager.clearPairingState()
-            for session in self.activeSessions.values {
-                session.connection.cancel()
-            }
-            self.activeSessions.removeAll()
+            let sessions = Array(self.activeSessions.values)
+            self.rosterManager.forgetAllPeers()
+            self.notifyUnpairAndDrop(sessions)
             self.updateCachedState()
             self.publishPeers()
             self.onLog?("Unpaired from all devices")
@@ -151,14 +147,30 @@ public final class WebSocketServer: @unchecked Sendable {
     public func removePeer(_ peerID: String) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.rosterManager.removePeer(id: peerID)
-            for (id, session) in self.activeSessions where session.peerID == peerID {
-                session.connection.cancel()
-                self.activeSessions.removeValue(forKey: id)
-            }
+            self.rosterManager.forgetPeer(id: peerID)
+            let sessions = self.activeSessions.values.filter { $0.peerID == peerID }
+            self.notifyUnpairAndDrop(Array(sessions))
             self.updateCachedState()
             self.publishPeers()
             self.onLog?("Removed peer")
+        }
+    }
+
+    private func notifyUnpairAndDrop(_ sessions: [WebSocketSession]) {
+        for session in sessions {
+            let id = ObjectIdentifier(session.connection)
+            session.sendText(["type": "unpair"]) { [weak self] in
+                self?.queue.async {
+                    guard let self else { return }
+                    session.connection.cancel()
+                    self.activeSessions.removeValue(forKey: id)
+                }
+            }
+            queue.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                guard let self, self.activeSessions[id] === session else { return }
+                session.connection.cancel()
+                self.activeSessions.removeValue(forKey: id)
+            }
         }
     }
 
@@ -477,6 +489,15 @@ public final class WebSocketServer: @unchecked Sendable {
             return
         }
 
+        let isPairingScan = json["pairing"] as? Bool ?? false
+        guard rosterManager.shouldAcceptPeer(clientID, isPairingScan: isPairingScan) else {
+            onLog?("Unpaired device reconnect ignored")
+            session.sendText(["type": "unpair"]) {
+                session.connection.cancel()
+            }
+            return
+        }
+
         let incomingID = ObjectIdentifier(session.connection)
         guard PeerPresence.shouldProcessAuth(
             isStillActive: activeSessions[incomingID] === session,
@@ -790,7 +811,7 @@ private final class WebSocketSession: @unchecked Sendable {
         self.connection = connection
     }
 
-    func sendText(_ object: [String: Any]) {
+    func sendText(_ object: [String: Any], onComplete: (() -> Void)? = nil) {
         do {
             let data = try JSONSerialization.data(withJSONObject: object)
             let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
@@ -799,9 +820,11 @@ private final class WebSocketSession: @unchecked Sendable {
                 if let error {
                     print("[WebSocketSession] sendText error: \(error)")
                 }
+                onComplete?()
             })
         } catch {
             print("[WebSocketSession] JSONSerialization failed: \(error)")
+            onComplete?()
         }
     }
 

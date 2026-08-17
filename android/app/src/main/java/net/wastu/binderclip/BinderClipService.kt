@@ -103,7 +103,7 @@ class BinderClipService : Service() {
                 Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
                     client.setInteractive(true)
                     if (automaticClipboardEnabled) startRootPolling()
-                    if (!client.isConnected()) requestConnectResettingBackoff("screen_on")
+                    if (store.groupKey != null && !client.isConnected()) requestConnectResettingBackoff("screen_on")
                 }
                 Intent.ACTION_SCREEN_OFF -> {
                     client.setInteractive(false)
@@ -139,6 +139,13 @@ class BinderClipService : Service() {
             },
             onRosterChanged = { publishState() },
             onDisconnected = { publishState() },
+            onUnpaired = {
+                lastError = null
+                pairingHint = null
+                store.unpair()
+                DiagnosticLog.info("Mac unpaired this phone")
+                publishState()
+            },
         )
         val power = getSystemService(PowerManager::class.java)
         client.setInteractive(power?.isInteractive != false)

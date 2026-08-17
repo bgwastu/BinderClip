@@ -84,6 +84,7 @@ final class RosterManager: @unchecked Sendable {
     private(set) var localName: String
     private(set) var groupKey: Data
     private(set) var peers: [String: Peer] = [:]
+    private var unpairedIDs: Set<String> = []
 
     init(stateDirectory: URL = PrivateStateStore.applicationSupportDirectory(), defaults: UserDefaults = .standard) {
         self.secureStore = PrivateStateStore(directory: stateDirectory)
@@ -112,9 +113,9 @@ final class RosterManager: @unchecked Sendable {
         }
 
         loadPeers()
+        loadUnpairedIDs()
         markAllDisconnected()
         defaults.removeObject(forKey: "host-target")
-        defaults.removeObject(forKey: "tombstoned-peers")
     }
 
     func setLocalName(_ name: String) -> String {
@@ -134,20 +135,49 @@ final class RosterManager: @unchecked Sendable {
         self.groupKey = fresh
         secureStore.set(fresh, account: "group-key")
         self.peers.removeAll()
+        unpairedIDs.removeAll()
         persistPeers()
+        persistUnpairedIDs()
         return fresh
     }
 
     func clearPairingState() {
-        self.peers.removeAll()
-        persistPeers()
+        forgetAllPeers()
     }
 
     func addOrUpdatePeer(_ peer: Peer) -> Bool {
         guard peer.id != localID else { return false }
+        unpairedIDs.remove(peer.id)
+        persistUnpairedIDs()
         peers[peer.id] = peer
         persistPeers()
         return true
+    }
+
+    func shouldAcceptPeer(_ peerID: String, isPairingScan: Bool) -> Bool {
+        let allowed = PeerPresence.shouldAcceptReturningPeer(
+            wasUnpaired: unpairedIDs.contains(peerID),
+            isPairingScan: isPairingScan
+        )
+        if allowed && isPairingScan {
+            unpairedIDs.remove(peerID)
+            persistUnpairedIDs()
+        }
+        return allowed
+    }
+
+    func forgetPeer(id: String) {
+        peers.removeValue(forKey: id)
+        unpairedIDs.insert(id)
+        persistPeers()
+        persistUnpairedIDs()
+    }
+
+    func forgetAllPeers() {
+        unpairedIDs.formUnion(peers.keys)
+        peers.removeAll()
+        persistPeers()
+        persistUnpairedIDs()
     }
 
     func setPeerConnected(_ peerID: String, connected: Bool, endpoint: DirectEndpoint? = nil) {
@@ -177,8 +207,7 @@ final class RosterManager: @unchecked Sendable {
     }
 
     func removePeer(id: String) {
-        peers.removeValue(forKey: id)
-        persistPeers()
+        forgetPeer(id: id)
     }
 
     func peerSnapshot() -> [Peer] {
@@ -202,5 +231,20 @@ final class RosterManager: @unchecked Sendable {
             Peer(id: peer.id, name: peer.name, endpoint: peer.endpoint, connected: false, platform: peer.platform)
         }
         defaults.set(try? JSONEncoder().encode(stored), forKey: "peers")
+    }
+
+    private func loadUnpairedIDs() {
+        if let saved = defaults.array(forKey: "unpaired-peer-ids") as? [String] {
+            unpairedIDs = Set(saved)
+        }
+        if let legacy = defaults.array(forKey: "tombstoned-peers") as? [String] {
+            unpairedIDs.formUnion(legacy)
+            defaults.removeObject(forKey: "tombstoned-peers")
+            persistUnpairedIDs()
+        }
+    }
+
+    private func persistUnpairedIDs() {
+        defaults.set(Array(unpairedIDs), forKey: "unpaired-peer-ids")
     }
 }

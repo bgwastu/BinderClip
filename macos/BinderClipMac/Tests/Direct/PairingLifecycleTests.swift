@@ -34,6 +34,8 @@ final class PairingLifecycleTests: XCTestCase {
         XCTAssertTrue(manager.addOrUpdatePeer(peer))
         manager.removePeer(id: "device-aaa")
         XCTAssertNil(manager.peers["device-aaa"])
+        XCTAssertFalse(manager.shouldAcceptPeer("device-aaa", isPairingScan: false))
+        XCTAssertTrue(manager.shouldAcceptPeer("device-aaa", isPairingScan: true))
         XCTAssertTrue(manager.addOrUpdatePeer(peer))
         XCTAssertNotNil(manager.peers["device-aaa"])
     }

@@ -27,6 +27,17 @@ final class RosterManagerTests: XCTestCase {
         XCTAssertNotNil(manager.peers["device-bbb"])
     }
 
+    func testForgetPeerRejectsReconnectUntilPairingScan() {
+        let manager = isolatedManager()
+        let peer = Peer(id: "phone-1", name: "Pixel", endpoint: DirectEndpoint(host: "192.168.1.8", port: 39421), connected: true, platform: "Android")
+        XCTAssertTrue(manager.addOrUpdatePeer(peer))
+        manager.forgetPeer(id: "phone-1")
+        XCTAssertNil(manager.peers["phone-1"])
+        XCTAssertFalse(manager.shouldAcceptPeer("phone-1", isPairingScan: false))
+        XCTAssertTrue(manager.shouldAcceptPeer("phone-1", isPairingScan: true))
+        XCTAssertTrue(manager.shouldAcceptPeer("phone-1", isPairingScan: false))
+    }
+
     func testMarkAllDisconnectedClearsLivePresence() {
         let manager = isolatedManager()
         manager.clearPairingState()

@@ -29,6 +29,7 @@ class WebSocketClient(
     private val onPeerIdentity: (String, String) -> Unit,
     private val onRosterChanged: (List<RememberedPeer>) -> Unit,
     private val onDisconnected: () -> Unit,
+    private val onUnpaired: () -> Unit,
 ) {
     companion object {
         private const val TAG = "BinderClipWS"
@@ -58,6 +59,7 @@ class WebSocketClient(
     @Volatile private var lastHeardMs = 0L
     private var heartbeatWatch: ScheduledFuture<*>? = null
     @Volatile private var interactive = true
+    @Volatile private var pairingScan = false
 
     fun isConnected(): Boolean = isConnected.get()
     fun isConnecting(): Boolean = isConnecting.get()
@@ -97,6 +99,7 @@ class WebSocketClient(
             connected = false
         )
 
+        pairingScan = true
         requestConnect(force = true, resetBackoff = true)
     }
 
@@ -182,6 +185,7 @@ class WebSocketClient(
                         put("deviceName", localName)
                         put("platform", "Android")
                         put("version", SyncProtocol.VERSION)
+                        put("pairing", pairingScan)
                     }
                     webSocket.send(authJson.toString())
                 }
@@ -261,6 +265,7 @@ class WebSocketClient(
                 isConnecting.set(false)
                 policy.resetBackoff()
                 reportedFailure.set(true)
+                pairingScan = false
 
                 for ((ep, sock) in candidateSockets) {
                     if (ep != endpoint) {
@@ -336,6 +341,10 @@ class WebSocketClient(
             }
 
             "pong" -> {}
+
+            "unpair" -> {
+                applyRemoteUnpair()
+            }
         }
     }
 
@@ -414,6 +423,7 @@ class WebSocketClient(
 
     fun close() {
         generation++
+        pairingScan = false
         cancelPendingReconnect()
         stopHeartbeatWatch()
         closeCandidateSockets()
@@ -423,6 +433,26 @@ class WebSocketClient(
         isConnected.set(false)
         isConnecting.set(false)
         policy.resetBackoff()
+    }
+
+    private fun applyRemoteUnpair() {
+        generation++
+        pairingScan = false
+        store.unpair()
+        cancelPendingReconnect()
+        executor.execute {
+            stopHeartbeatWatch()
+            closeCandidateSockets()
+            activeSocket?.close(1000, "Unpaired")
+            activeSocket = null
+            activeEndpoint = null
+            isConnected.set(false)
+            isConnecting.set(false)
+            policy.resetBackoff()
+            onDisconnected()
+            onStatus("Not paired")
+            onUnpaired()
+        }
     }
 
     private fun closeCandidateSockets() {

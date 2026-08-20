@@ -15,6 +15,7 @@ sealed interface AccessibilityClipboard {
  * User-enabled, narrow clipboard observer for non-root devices. It never reads
  * windows, sends gestures, or interprets accessibility events; it only receives
  * the system clipboard callback while Android keeps this service enabled.
+ * When Android binds it after boot, it starts BinderClipService if the phone is paired.
  */
 object AccessibilityClipboardBridge {
     @Volatile var onClipboard: ((AccessibilityClipboard) -> Unit)? = null
@@ -51,6 +52,7 @@ class ClipboardAccessibilityService : AccessibilityService() {
         clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.addPrimaryClipChangedListener(listener)
         AccessibilityClipboardBridge.connected(this)
+        BinderClipService.startIfPaired(this)
     }
 
     override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) = Unit

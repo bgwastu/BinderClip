@@ -9,8 +9,9 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Optional root integration. It never reads a clipboard through a forged system identity.
- * Instead, after the owner approves BinderClip in KernelSU, it grants BinderClip the Android
- * background clipboard capability and verifies that grant before automatic sync is enabled.
+ * After the owner approves BinderClip in KernelSU or Magisk, it grants background clipboard
+ * access and can install a late-start boot script so the sync service comes back after reboot
+ * without opening the app.
  */
 object RootClipboardBridge {
     private const val BACKGROUND_CLIPBOARD_PERMISSION = "android.permission.READ_CLIPBOARD_IN_BACKGROUND"
@@ -118,7 +119,54 @@ object RootClipboardBridge {
         text?.let(Clip::Text)
     }.getOrNull()
 
-    private fun runRootCommand(command: String): Boolean = runCatching {
+    fun syncKeepAlive(context: Context, paired: Boolean) {
+        if (!isAvailable()) return
+        val packageName = ServiceAutostart.requireSafePackageName(context.packageName)
+        if (paired) {
+            applyKeepAlivePrivileges(packageName)
+            when {
+                !runRootCommand("test -d /data/adb", logFailure = false) -> {}
+                installBootScript(packageName) -> DiagnosticLog.info("Installed root boot keep-alive")
+                else -> DiagnosticLog.warning("Could not install root boot keep-alive")
+            }
+        } else if (removeBootScript()) {
+            DiagnosticLog.info("Removed root boot keep-alive")
+        }
+    }
+
+    private fun applyKeepAlivePrivileges(packageName: String) {
+        runRootCommand("dumpsys deviceidle whitelist +$packageName", logFailure = false)
+        runRootCommand("cmd deviceidle whitelist +$packageName", logFailure = false)
+        runRootCommand("cmd appops set $packageName RUN_ANY_IN_BACKGROUND allow", logFailure = false)
+        runRootCommand("cmd appops set $packageName RUN_IN_BACKGROUND allow", logFailure = false)
+        runRootCommand("pm grant $packageName android.permission.POST_NOTIFICATIONS", logFailure = false)
+    }
+
+    private fun installBootScript(packageName: String): Boolean {
+        val encoded = android.util.Base64.encodeToString(
+            ServiceAutostart.bootScript(packageName).toByteArray(Charsets.UTF_8),
+            android.util.Base64.NO_WRAP,
+        )
+        val servicePath = "${ServiceAutostart.SERVICE_D_DIR}/${ServiceAutostart.BOOT_SCRIPT_NAME}"
+        val bootCompletedPath = "${ServiceAutostart.BOOT_COMPLETED_D_DIR}/${ServiceAutostart.BOOT_SCRIPT_NAME}"
+        val installed = runRootCommand(
+            "mkdir -p ${ServiceAutostart.SERVICE_D_DIR} && " +
+                "printf '%s' $encoded | base64 -d > $servicePath && chmod 755 $servicePath",
+        )
+        runRootCommand(
+            "if [ -d ${ServiceAutostart.BOOT_COMPLETED_D_DIR} ]; then " +
+                "printf '%s' $encoded | base64 -d > $bootCompletedPath && chmod 755 $bootCompletedPath; fi",
+            logFailure = false,
+        )
+        return installed
+    }
+
+    private fun removeBootScript(): Boolean = runRootCommand(
+        "rm -f ${ServiceAutostart.SERVICE_D_DIR}/${ServiceAutostart.BOOT_SCRIPT_NAME} " +
+            "${ServiceAutostart.BOOT_COMPLETED_D_DIR}/${ServiceAutostart.BOOT_SCRIPT_NAME}",
+    )
+
+    private fun runRootCommand(command: String, logFailure: Boolean = true): Boolean = runCatching {
         for (path in suPaths) {
             val success = runCatching {
                 val process = ProcessBuilder(path, "-c", command).redirectErrorStream(true).start()
@@ -128,10 +176,10 @@ object RootClipboardBridge {
             }.getOrDefault(false)
             if (success) return true
         }
-        DiagnosticLog.warning("Root command failed ($command)")
+        if (logFailure) DiagnosticLog.warning("Root command failed ($command)")
         false
     }.getOrElse {
-        DiagnosticLog.warning("Root command exception ($command): ${it.message}")
+        if (logFailure) DiagnosticLog.warning("Root command exception ($command): ${it.message}")
         false
     }
 

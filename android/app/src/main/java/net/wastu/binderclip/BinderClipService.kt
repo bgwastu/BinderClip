@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -23,6 +24,7 @@ import android.os.PowerManager
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -70,6 +72,23 @@ class BinderClipService : Service() {
         private const val CHANNEL = "binderclip_sync"
         private const val URL_CHANNEL = "binderclip_urls"
         private const val NOTIFICATION_ID = 101
+
+        fun startFromBackground(context: Context) {
+            DiagnosticLog.initialize(context)
+            runCatching {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, BinderClipService::class.java).setAction(ACTION_START),
+                )
+            }.onFailure {
+                DiagnosticLog.warning("Could not start BinderClipService: ${it.message}")
+            }
+        }
+
+        fun startIfPaired(context: Context) {
+            if (DeviceStore(context).groupKey == null) return
+            startFromBackground(context)
+        }
     }
 
     private lateinit var store: DeviceStore
@@ -123,7 +142,7 @@ class BinderClipService : Service() {
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
 
         createChannel()
-        startForeground(NOTIFICATION_ID, notification("Starting BinderClip…"))
+        enterForeground("Starting BinderClip…")
 
         client = WebSocketClient(
             store = store,
@@ -145,6 +164,7 @@ class BinderClipService : Service() {
                 pairingHint = null
                 store.unpair()
                 DiagnosticLog.info("Mac unpaired this phone")
+                executor.execute { RootClipboardBridge.syncKeepAlive(this, paired = false) }
                 publishState()
             },
         )
@@ -176,6 +196,7 @@ class BinderClipService : Service() {
             if (store.groupKey != null) {
                 client.connect()
             }
+            RootClipboardBridge.syncKeepAlive(this, store.groupKey != null)
             if (automaticClipboardEnabled) startRootPolling()
             publishState()
         }
@@ -186,7 +207,9 @@ class BinderClipService : Service() {
         when (intent?.action ?: ACTION_START) {
             ACTION_PAIR -> intent?.getStringExtra(EXTRA_URI)?.let { uri ->
                 executor.execute {
-                    runCatching { client.pair(uri) }.onFailure { reportFailure(it.message ?: "Pairing failed") }
+                    runCatching { client.pair(uri) }
+                        .onSuccess { RootClipboardBridge.syncKeepAlive(this, store.groupKey != null) }
+                        .onFailure { reportFailure(it.message ?: "Pairing failed") }
                 }
             }
 
@@ -246,6 +269,7 @@ class BinderClipService : Service() {
                     stopRootPolling()
                     RootClipboardBridge.revokeBackgroundAccess(this)
                 }
+                RootClipboardBridge.syncKeepAlive(this, store.groupKey != null)
                 publishState()
                 toast(
                     when {
@@ -263,6 +287,7 @@ class BinderClipService : Service() {
                     store.setRootClipboardAutomationEnabled(false)
                     stopRootPolling()
                 }
+                RootClipboardBridge.syncKeepAlive(this, store.groupKey != null)
                 publishState()
             }
 
@@ -276,6 +301,7 @@ class BinderClipService : Service() {
                         store.lastGoodEndpoint = null
                         client.close()
                     }
+                    RootClipboardBridge.syncKeepAlive(this, store.groupKey != null)
                     publishState()
                 }
             }
@@ -323,6 +349,7 @@ class BinderClipService : Service() {
         pairingHint = null
         store.unpair()
         client.close()
+        RootClipboardBridge.syncKeepAlive(this, paired = false)
         publishState()
     }
 
@@ -531,6 +558,15 @@ class BinderClipService : Service() {
     }
 
     // MARK: - Notifications
+
+    private fun enterForeground(statusText: String) {
+        val notification = notification(statusText)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
 
     private fun createChannel() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
